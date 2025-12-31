@@ -49,11 +49,13 @@ HEART_LABELS = {
 }
 
 
-def load_nifti(path: Path) -> Tuple[np.ndarray, np.ndarray]:
-    """Load NIfTI file and return data with affine."""
+def load_nifti(path: Path) -> Tuple[np.ndarray, nib.Nifti1Image]:
+    """Load NIfTI file and return data with image object."""
     img = nib.load(path)
-    data = img.get_fdata()
-    return data, img.affine
+    # Reorient to canonical (RAS+) for consistent viewing
+    img_canonical = nib.as_closest_canonical(img)
+    data = img_canonical.get_fdata()
+    return data, img_canonical
 
 
 def normalize_image(image: np.ndarray, window_center: int = 40, window_width: int = 400) -> np.ndarray:
@@ -72,15 +74,22 @@ def create_mask_colormap(num_classes: int = 9) -> ListedColormap:
 
 
 def get_slice(data: np.ndarray, axis: str, idx: int) -> np.ndarray:
-    """Get a 2D slice from 3D volume."""
+    """Get a 2D slice from 3D volume with proper orientation for viewing."""
     if axis == 'axial':
-        return data[:, :, idx]
+        # Axial: looking from feet to head, patient supine
+        slc = data[:, :, idx]
+        slc = np.flipud(slc.T)  # Transpose and flip for radiological view
     elif axis == 'coronal':
-        return data[:, idx, :]
+        # Coronal: looking from front
+        slc = data[:, idx, :]
+        slc = np.flipud(slc.T)
     elif axis == 'sagittal':
-        return data[idx, :, :]
+        # Sagittal: looking from right side
+        slc = data[idx, :, :]
+        slc = np.flipud(slc.T)
     else:
         raise ValueError(f"Unknown axis: {axis}")
+    return slc
 
 
 def get_num_slices(data: np.ndarray, axis: str) -> int:
@@ -194,18 +203,14 @@ class HeartViewer:
         img_slice = get_slice(self.image, self.axis, self.current_slice)
         mask_slice = get_slice(self.mask, self.axis, self.current_slice)
 
-        # Rotate for proper orientation
-        img_slice = np.rot90(img_slice)
-        mask_slice = np.rot90(mask_slice)
-
-        # Display image
-        self.ax_img.imshow(img_slice, cmap='gray', aspect='auto')
+        # Display image with equal aspect ratio to preserve proportions
+        self.ax_img.imshow(img_slice, cmap='gray', aspect='equal')
 
         # Overlay mask
         if self.show_mask:
             masked = np.ma.masked_where(mask_slice == 0, mask_slice)
             self.ax_img.imshow(masked, cmap=self.cmap, alpha=self.alpha,
-                              aspect='auto', vmin=0, vmax=8)
+                              aspect='equal', vmin=0, vmax=8)
 
         self.ax_img.set_title(f'{self.axis.capitalize()} View - Slice {self.current_slice}')
         self.ax_img.axis('off')
@@ -292,12 +297,12 @@ def save_montage(image: np.ndarray, mask: np.ndarray, output_path: Path,
     axes = axes.flatten()
 
     for i, idx in enumerate(indices):
-        img_slice = np.rot90(get_slice(image_norm, axis, idx))
-        mask_slice = np.rot90(get_slice(mask, axis, idx))
+        img_slice = get_slice(image_norm, axis, idx)
+        mask_slice = get_slice(mask, axis, idx)
 
-        axes[i].imshow(img_slice, cmap='gray')
+        axes[i].imshow(img_slice, cmap='gray', aspect='equal')
         masked = np.ma.masked_where(mask_slice == 0, mask_slice)
-        axes[i].imshow(masked, cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+        axes[i].imshow(masked, cmap=cmap, alpha=0.5, vmin=0, vmax=8, aspect='equal')
         axes[i].set_title(f'Slice {idx}')
         axes[i].axis('off')
 
@@ -322,25 +327,25 @@ def save_single_slice(image: np.ndarray, mask: np.ndarray, output_path: Path,
     if slice_idx is None:
         slice_idx = get_num_slices(image, axis) // 2
 
-    img_slice = np.rot90(get_slice(image_norm, axis, slice_idx))
-    mask_slice = np.rot90(get_slice(mask, axis, slice_idx))
+    img_slice = get_slice(image_norm, axis, slice_idx)
+    mask_slice = get_slice(mask, axis, slice_idx)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     # Original image
-    axes[0].imshow(img_slice, cmap='gray')
+    axes[0].imshow(img_slice, cmap='gray', aspect='equal')
     axes[0].set_title('CT Image')
     axes[0].axis('off')
 
     # Mask only
-    axes[1].imshow(mask_slice, cmap=cmap, vmin=0, vmax=8)
+    axes[1].imshow(mask_slice, cmap=cmap, vmin=0, vmax=8, aspect='equal')
     axes[1].set_title('Heart Mask')
     axes[1].axis('off')
 
     # Overlay
-    axes[2].imshow(img_slice, cmap='gray')
+    axes[2].imshow(img_slice, cmap='gray', aspect='equal')
     masked = np.ma.masked_where(mask_slice == 0, mask_slice)
-    axes[2].imshow(masked, cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+    axes[2].imshow(masked, cmap=cmap, alpha=0.5, vmin=0, vmax=8, aspect='equal')
     axes[2].set_title('Overlay')
     axes[2].axis('off')
 
