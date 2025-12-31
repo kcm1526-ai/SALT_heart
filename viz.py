@@ -6,6 +6,7 @@ Simple visualization of CT images with heart segmentation mask overlay.
 
 Usage:
     python viz.py --image image.nii.gz --mask mask.nii.gz
+    python viz.py --image /path/to/dicom_folder --mask mask.nii.gz
     python viz.py --image image.nii.gz --mask mask.nii.gz --save output.png
 
 Author: Generated for SALT heart segmentation
@@ -17,6 +18,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
+import SimpleITK as sitk
 from matplotlib.colors import ListedColormap
 from matplotlib.widgets import Slider
 
@@ -46,11 +48,51 @@ HEART_LABELS = {
 }
 
 
-def load_nifti(path: Path) -> np.ndarray:
-    """Load NIfTI file and return data."""
-    img = nib.load(path)
-    img_canonical = nib.as_closest_canonical(img)
-    return img_canonical.get_fdata()
+def load_dicom_folder(dicom_path: Path) -> np.ndarray:
+    """Load DICOM series from folder."""
+    reader = sitk.ImageSeriesReader()
+
+    # Try to get series IDs
+    series_ids = sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(dicom_path))
+
+    if len(series_ids) == 0:
+        # Try finding .dcm files directly
+        dcm_files = list(dicom_path.glob("*.dcm")) + list(dicom_path.glob("*.DCM"))
+        if len(dcm_files) == 0:
+            raise ValueError(f"No DICOM files found in {dicom_path}")
+        dcm_files = sorted(dcm_files, key=lambda x: x.name)
+        dicom_names = [str(f) for f in dcm_files]
+    else:
+        dicom_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
+            str(dicom_path), series_ids[0]
+        )
+
+    reader.SetFileNames(dicom_names)
+    image = reader.Execute()
+
+    # Convert to numpy array
+    data = sitk.GetArrayFromImage(image)
+    # SimpleITK returns (Z, Y, X), transpose to (X, Y, Z) for consistency
+    data = np.transpose(data, (2, 1, 0))
+    return data
+
+
+def load_image(path: Path) -> np.ndarray:
+    """Load image from NIfTI file or DICOM folder."""
+    if path.is_dir():
+        # DICOM folder
+        print(f"Loading DICOM folder: {path}")
+        return load_dicom_folder(path)
+    elif path.suffix.lower() in ['.dcm']:
+        # Single DICOM file - load parent folder
+        print(f"Loading DICOM from parent folder: {path.parent}")
+        return load_dicom_folder(path.parent)
+    else:
+        # NIfTI file
+        print(f"Loading NIfTI file: {path}")
+        img = nib.load(path)
+        img_canonical = nib.as_closest_canonical(img)
+        return img_canonical.get_fdata()
 
 
 def normalize_image(image: np.ndarray, window_center: int = 40, window_width: int = 400) -> np.ndarray:
@@ -207,9 +249,9 @@ def main():
         raise FileNotFoundError(f"Mask not found: {args.mask}")
 
     print(f"Loading image: {args.image}")
-    image = load_nifti(args.image)
+    image = load_image(args.image)
     print(f"Loading mask: {args.mask}")
-    mask = load_nifti(args.mask)
+    mask = load_image(args.mask)
 
     print(f"Image shape: {image.shape}")
     print(f"Mask shape: {mask.shape}")
