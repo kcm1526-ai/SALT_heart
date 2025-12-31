@@ -84,9 +84,17 @@ def interactive_viewer(image: np.ndarray, mask: np.ndarray):
     img_slice = np.rot90(image_norm[:, :, current_slice])
     mask_slice = np.rot90(mask[:, :, current_slice])
 
-    im = ax.imshow(img_slice, cmap='gray')
+    # Get image dimensions for proper display
+    h, w = img_slice.shape
+
+    im = ax.imshow(img_slice, cmap='gray', extent=[0, w, h, 0])
     mask_im = ax.imshow(np.ma.masked_where(mask_slice == 0, mask_slice),
-                        cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+                        cmap=cmap, alpha=0.5, vmin=0, vmax=8, extent=[0, w, h, 0])
+
+    # Set axis limits to show full image (zoom level 0)
+    ax.set_xlim(0, w)
+    ax.set_ylim(h, 0)
+    ax.set_aspect('equal')
     ax.set_title(f'Slice {current_slice}/{num_slices-1}')
     ax.axis('off')
 
@@ -102,6 +110,8 @@ def interactive_viewer(image: np.ndarray, mask: np.ndarray):
 
         im.set_data(img_slice)
         mask_im.set_data(np.ma.masked_where(mask_slice == 0, mask_slice))
+        ax.set_xlim(0, w)
+        ax.set_ylim(h, 0)
         ax.set_title(f'Slice {idx}/{num_slices-1}')
         fig.canvas.draw_idle()
 
