@@ -119,7 +119,7 @@ def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path
     Convert DICOM series to NIfTI format.
 
     Args:
-        dicom_path: Path to DICOM folder
+        dicom_path: Path to DICOM folder containing .dcm files
         output_path: Optional output path for NIfTI file
 
     Returns:
@@ -129,13 +129,45 @@ def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path
 
     # Read DICOM series
     reader = sitk.ImageSeriesReader()
-    dicom_names = reader.GetGDCMSeriesFileNames(str(dicom_path))
+
+    # Try to get series IDs first
+    series_ids = sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(dicom_path))
+
+    if len(series_ids) == 0:
+        # Try finding .dcm files directly
+        dcm_files = list(dicom_path.glob("*.dcm")) + list(dicom_path.glob("*.DCM"))
+        if len(dcm_files) == 0:
+            # Try files without extension (common in DICOM)
+            all_files = [f for f in dicom_path.iterdir() if f.is_file()]
+            raise ValueError(
+                f"No DICOM files found in {dicom_path}. "
+                f"Found {len(all_files)} files but none recognized as DICOM. "
+                "Make sure the folder contains valid DICOM files (.dcm)."
+            )
+        # Sort by filename to maintain slice order
+        dcm_files = sorted(dcm_files, key=lambda x: x.name)
+        dicom_names = [str(f) for f in dcm_files]
+        logger.info(f"Found {len(dicom_names)} DICOM files by extension")
+    else:
+        # Use the first series (usually there's only one for CT)
+        logger.info(f"Found {len(series_ids)} DICOM series")
+        dicom_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
+            str(dicom_path), series_ids[0]
+        )
+        logger.info(f"Using series with {len(dicom_names)} slices")
 
     if len(dicom_names) == 0:
         raise ValueError(f"No DICOM files found in {dicom_path}")
 
     reader.SetFileNames(dicom_names)
+    reader.MetaDataDictionaryArrayUpdateOn()
+    reader.LoadPrivateTagsOn()
+
+    logger.info(f"Reading {len(dicom_names)} DICOM slices...")
     image = reader.Execute()
+
+    logger.info(f"Image size: {image.GetSize()}")
+    logger.info(f"Image spacing: {image.GetSpacing()}")
 
     # Determine output path
     if output_path is None:
@@ -153,14 +185,15 @@ def load_input(input_path: Path, temp_dir: Optional[Path] = None) -> Tuple[Path,
     Load input file, converting from DICOM if necessary.
 
     Args:
-        input_path: Path to input file or DICOM folder
+        input_path: Path to input file or DICOM folder containing .dcm files
         temp_dir: Temporary directory for converted files
 
     Returns:
         Tuple of (nifti_path, is_temporary)
     """
     if input_path.is_dir():
-        # Assume it's a DICOM folder
+        # It's a folder - treat as DICOM directory
+        logger.info(f"Input is a directory, treating as DICOM folder...")
         if temp_dir is None:
             temp_dir = input_path.parent
         nifti_path = dicom_to_nifti(
@@ -168,11 +201,28 @@ def load_input(input_path: Path, temp_dir: Optional[Path] = None) -> Tuple[Path,
             temp_dir / f"{input_path.name}_temp.nii.gz"
         )
         return nifti_path, True
-    elif input_path.suffix in [".gz", ".nii"]:
+    elif input_path.suffix.lower() in [".gz", ".nii"]:
         # Already NIfTI
+        logger.info(f"Input is NIfTI file")
         return input_path, False
+    elif input_path.suffix.lower() in [".dcm"]:
+        # Single DICOM file - use parent directory
+        logger.info(f"Input is single DICOM file, using parent directory...")
+        if temp_dir is None:
+            temp_dir = input_path.parent
+        nifti_path = dicom_to_nifti(
+            input_path.parent,
+            temp_dir / f"{input_path.parent.name}_temp.nii.gz"
+        )
+        return nifti_path, True
     else:
-        raise ValueError(f"Unsupported input format: {input_path}")
+        raise ValueError(
+            f"Unsupported input format: {input_path}\n"
+            "Supported formats:\n"
+            "  - NIfTI file (.nii, .nii.gz)\n"
+            "  - DICOM folder (directory containing .dcm files)\n"
+            "  - Single DICOM file (.dcm)"
+        )
 
 
 def extract_heart_mask(
