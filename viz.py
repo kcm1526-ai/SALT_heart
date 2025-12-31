@@ -104,6 +104,22 @@ def normalize_image(image: np.ndarray, window_center: int = 40, window_width: in
     return (image - min_val) / (max_val - min_val)
 
 
+def resize_mask_to_image(mask: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """Resize mask to match image dimensions using nearest neighbor interpolation."""
+    from scipy.ndimage import zoom
+
+    if mask.shape == target_shape:
+        return mask
+
+    # Calculate zoom factors
+    zoom_factors = [t / s for t, s in zip(target_shape, mask.shape)]
+
+    # Use order=0 (nearest neighbor) to preserve label values
+    resized_mask = zoom(mask, zoom_factors, order=0)
+
+    return resized_mask
+
+
 def create_colormap() -> ListedColormap:
     """Create colormap for mask."""
     colors = [HEART_COLORS.get(i, (0.5, 0.5, 0.5, 0.5)) for i in range(9)]
@@ -294,6 +310,12 @@ def main():
     print(f"Image shape: {image.shape}")
     print(f"Mask shape: {mask.shape}")
     print(f"Unique mask values: {np.unique(mask).astype(int)}")
+
+    # Resize mask to match image if shapes differ
+    if image.shape != mask.shape:
+        print(f"Resizing mask from {mask.shape} to {image.shape}...")
+        mask = resize_mask_to_image(mask, image.shape)
+        print(f"Resized mask shape: {mask.shape}")
 
     if args.save:
         save_image(image, mask, args.save, args.slice)
