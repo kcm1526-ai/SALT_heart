@@ -30,10 +30,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import nibabel as nib
 import SimpleITK as sitk
 import torch
-from monai.transforms import SaveImage
 from monai.transforms.utils import allow_missing_keys_mode
+from scipy.ndimage import zoom
 
 from salt.input_pipeline import (
     IntensityProperties,
@@ -483,29 +484,41 @@ def run_inference(
             binary=binary,
         )
 
-        # Save using the metadata from preprocessing
+        # Resample mask back to original image space
+        logger.info("Resampling mask to original image space...")
+
+        # Load original image to get its shape and metadata
+        original_img = nib.load(nifti_path)
+        original_shape = original_img.shape
+        original_affine = original_img.affine
+        original_header = original_img.header
+
+        logger.info(f"  Model space shape: {heart_mask.shape}")
+        logger.info(f"  Original image shape: {original_shape}")
+
+        # Resample mask to original shape using nearest neighbor interpolation
+        if heart_mask.shape != original_shape:
+            zoom_factors = [o / m for o, m in zip(original_shape, heart_mask.shape)]
+            logger.info(f"  Zoom factors: {zoom_factors}")
+            heart_mask_resampled = zoom(heart_mask, zoom_factors, order=0, mode='nearest')
+            logger.info(f"  Resampled mask shape: {heart_mask_resampled.shape}")
+        else:
+            heart_mask_resampled = heart_mask
+
+        # Save with original image's affine and header
         input_name = input_path.name if input_path.is_dir() else input_path.stem.replace('.nii', '')
         if input_name.endswith("_temp"):
             input_name = input_name[:-5]
         output_path = output_dir / f"{input_name}_heart_mask.nii.gz"
 
-        # Create NIfTI with proper metadata
-        saver = SaveImage(
-            output_dir=str(output_dir),
-            output_postfix="",
-            output_ext=".nii.gz",
-            output_dtype=np.uint8,
-            separate_folder=False,
+        # Create NIfTI with original spatial metadata
+        mask_nifti = nib.Nifti1Image(
+            heart_mask_resampled.astype(np.uint8),
+            affine=original_affine,
+            header=original_header
         )
-
-        # Add channel dimension back for SaveImage
-        heart_mask_tensor = torch.from_numpy(heart_mask).unsqueeze(0)
-
-        # Update metadata to use our filename
-        meta_dict = dict(example["image_meta_dict"])
-        meta_dict["filename_or_obj"] = str(output_path)
-
-        saver(heart_mask_tensor, meta_dict)
+        mask_nifti.header.set_data_dtype(np.uint8)
+        nib.save(mask_nifti, output_path)
 
         logger.info(f"Heart mask saved to {output_path}")
 
@@ -515,7 +528,7 @@ def run_inference(
             f.write("# Heart Segmentation Labels\n")
             f.write("# Value: Label Name\n")
             for value, name in sorted(label_mapping.items()):
-                count = np.sum(heart_mask == value)
+                count = np.sum(heart_mask_resampled == value)
                 f.write(f"{value}: {name} ({count:,} voxels)\n")
         logger.info(f"Labels saved to {label_file}")
 
@@ -526,9 +539,9 @@ def run_inference(
         logger.info(f"Input: {input_path}")
         logger.info(f"Output: {output_path}")
         logger.info(f"Time: {inference_time:.2f}s")
-        logger.info(f"Total heart voxels: {np.sum(heart_mask > 0):,}")
+        logger.info(f"Total heart voxels: {np.sum(heart_mask_resampled > 0):,}")
         for value, name in sorted(label_mapping.items()):
-            logger.info(f"  {value}: {name} ({np.sum(heart_mask == value):,} voxels)")
+            logger.info(f"  {value}: {name} ({np.sum(heart_mask_resampled == value):,} voxels)")
         logger.info("=" * 50)
 
         return output_path
