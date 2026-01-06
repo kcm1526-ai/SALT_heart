@@ -128,6 +128,7 @@ def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path
         raise ValueError(f"No DICOM files found in {dicom_path}")
 
     reader.SetFileNames(dicom_names)
+    reader.SetImageIO("GDCMImageIO")  # Explicitly use GDCM for DICOM
     reader.MetaDataDictionaryArrayUpdateOn()
     reader.LoadPrivateTagsOn()
 
