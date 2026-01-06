@@ -2,29 +2,23 @@
 """
 Heart Segmentation Inference Script for SALT
 
-This script performs heart segmentation from CT images (DICOM or NIfTI format).
-It uses the pre-trained SALT model to segment heart structures including:
+This script performs heart segmentation from CT images (DICOM folder or NIfTI format).
+It segments the heart organ with 5 structures:
 - Heart myocardium
 - Left atrium
-- Right atrium
 - Left ventricle
+- Right atrium
 - Right ventricle
-- Pericardium (optional)
-- Aorta (thoracic, pass pericardium) (optional)
-- Pulmonary artery (pass pericardium) (optional)
 
 Usage:
-    # From DICOM folder:
+    # From DICOM folder (folder containing .dcm files):
     python infer_heart.py --input /path/to/dicom_folder --output /path/to/output
 
     # From NIfTI file:
     python infer_heart.py --input /path/to/image.nii.gz --output /path/to/output
 
-    # Binary mask (all heart structures combined):
-    python infer_heart.py --input /path/to/input --output /path/to/output --binary
-
-    # Include pericardium and vessels:
-    python infer_heart.py --input /path/to/input --output /path/to/output --include-pericardium --include-vessels
+    # Binary mask (all heart structures combined as 1):
+    python infer_heart.py --input /path/to/dicom_folder --output /path/to/output --binary
 
 Author: Generated based on SALT framework
 """
@@ -32,16 +26,15 @@ Author: Generated based on SALT framework
 import logging
 import pickle
 import time
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import nibabel as nib
 import SimpleITK as sitk
 import torch
-from monai.transforms import Compose, SaveImage
 from monai.transforms.utils import allow_missing_keys_mode
 
 from salt.input_pipeline import (
@@ -58,17 +51,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Heart-related label definitions based on saros+totalseg labels
-# Format: (label_index_in_file, label_name, is_core_heart)
+# Heart structure labels (5 core heart structures only)
 HEART_LABELS = {
-    "heart_myocardium": {"file_index": 57, "output_value": 1, "is_core": True},
-    "heart_atrium_left": {"file_index": 58, "output_value": 2, "is_core": True},
-    "heart_ventricle_left": {"file_index": 59, "output_value": 3, "is_core": True},
-    "heart_atrium_right": {"file_index": 60, "output_value": 4, "is_core": True},
-    "heart_ventricle_right": {"file_index": 61, "output_value": 5, "is_core": True},
-    "pericardium": {"file_index": 7, "output_value": 6, "is_core": False},
-    "aorta_thoracica_pass_pericardium": {"file_index": 118, "output_value": 7, "is_core": False},
-    "pulmonary_artery_pass_pericardium": {"file_index": 120, "output_value": 8, "is_core": False},
+    "heart_myocardium": {"file_index": 57, "output_value": 1},
+    "heart_atrium_left": {"file_index": 58, "output_value": 2},
+    "heart_ventricle_left": {"file_index": 59, "output_value": 3},
+    "heart_atrium_right": {"file_index": 60, "output_value": 4},
+    "heart_ventricle_right": {"file_index": 61, "output_value": 5},
 }
 
 
@@ -78,18 +67,7 @@ def argmax_leaves(
     dim: int = 1,
     pruned: bool = True,
 ) -> torch.Tensor:
-    """
-    Compute argmax over leaf nodes in the label tree.
-
-    Args:
-        inputs: Model output probabilities [B, C, D, H, W]
-        adjacency_matrix: Tree structure matrix
-        dim: Dimension to compute argmax over
-        pruned: If True, return indices relative to leaf nodes only
-
-    Returns:
-        Tensor with predicted leaf node indices
-    """
+    """Compute argmax over leaf nodes in the label tree."""
     leave_nodes = np.where(adjacency_matrix[1:, 1:].sum(axis=1) == 0)[0]
     indices = np.arange(adjacency_matrix.shape[0] - 1, dtype=np.int32)
     indices = indices[leave_nodes]
@@ -101,25 +79,17 @@ def argmax_leaves(
 
 
 def get_leaf_to_original_mapping(adjacency_matrix: np.ndarray) -> Dict[int, int]:
-    """
-    Create mapping from leaf node indices to original label indices.
-
-    Args:
-        adjacency_matrix: Tree structure matrix
-
-    Returns:
-        Dictionary mapping leaf index to original label index
-    """
+    """Create mapping from leaf node indices to original label indices."""
     leave_nodes = np.where(adjacency_matrix[1:, 1:].sum(axis=1) == 0)[0]
     return {i: int(leave_nodes[i]) for i in range(len(leave_nodes))}
 
 
 def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path:
     """
-    Convert DICOM series to NIfTI format.
+    Convert DICOM folder to NIfTI format.
 
     Args:
-        dicom_path: Path to DICOM folder containing .dcm files
+        dicom_path: Path to folder containing .dcm files
         output_path: Optional output path for NIfTI file
 
     Returns:
@@ -127,37 +97,27 @@ def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path
     """
     logger.info(f"Converting DICOM from {dicom_path} to NIfTI...")
 
-    # Read DICOM series
     reader = sitk.ImageSeriesReader()
-
-    # Try to get series IDs first
     series_ids = sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(dicom_path))
 
     if len(series_ids) == 0:
         # Try finding .dcm files directly
         dcm_files = list(dicom_path.glob("*.dcm")) + list(dicom_path.glob("*.DCM"))
         if len(dcm_files) == 0:
-            # Try files without extension (common in DICOM)
             all_files = [f for f in dicom_path.iterdir() if f.is_file()]
             raise ValueError(
                 f"No DICOM files found in {dicom_path}. "
-                f"Found {len(all_files)} files but none recognized as DICOM. "
-                "Make sure the folder contains valid DICOM files (.dcm)."
+                f"Found {len(all_files)} files but none recognized as DICOM."
             )
-        # Sort by filename to maintain slice order
         dcm_files = sorted(dcm_files, key=lambda x: x.name)
         dicom_names = [str(f) for f in dcm_files]
-        logger.info(f"Found {len(dicom_names)} DICOM files by extension")
+        logger.info(f"Found {len(dicom_names)} DICOM files")
     else:
-        # Use the first series (usually there's only one for CT)
         logger.info(f"Found {len(series_ids)} DICOM series")
         dicom_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
             str(dicom_path), series_ids[0]
         )
         logger.info(f"Using series with {len(dicom_names)} slices")
-
-    if len(dicom_names) == 0:
-        raise ValueError(f"No DICOM files found in {dicom_path}")
 
     reader.SetFileNames(dicom_names)
     reader.MetaDataDictionaryArrayUpdateOn()
@@ -166,34 +126,21 @@ def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path
     logger.info(f"Reading {len(dicom_names)} DICOM slices...")
     image = reader.Execute()
 
-    logger.info(f"Image size: {image.GetSize()}")
-    logger.info(f"Image spacing: {image.GetSpacing()}")
+    logger.info(f"Image size: {image.GetSize()}, spacing: {image.GetSpacing()}")
 
-    # Determine output path
     if output_path is None:
         output_path = dicom_path.parent / f"{dicom_path.name}_converted.nii.gz"
 
-    # Write NIfTI
     sitk.WriteImage(image, str(output_path))
-    logger.info(f"DICOM converted and saved to {output_path}")
+    logger.info(f"Saved to {output_path}")
 
     return output_path
 
 
 def load_input(input_path: Path, temp_dir: Optional[Path] = None) -> Tuple[Path, bool]:
-    """
-    Load input file, converting from DICOM if necessary.
-
-    Args:
-        input_path: Path to input file or DICOM folder containing .dcm files
-        temp_dir: Temporary directory for converted files
-
-    Returns:
-        Tuple of (nifti_path, is_temporary)
-    """
+    """Load input, converting from DICOM if it's a folder."""
     if input_path.is_dir():
-        # It's a folder - treat as DICOM directory
-        logger.info(f"Input is a directory, treating as DICOM folder...")
+        logger.info(f"Input is DICOM folder...")
         if temp_dir is None:
             temp_dir = input_path.parent
         nifti_path = dicom_to_nifti(
@@ -202,12 +149,10 @@ def load_input(input_path: Path, temp_dir: Optional[Path] = None) -> Tuple[Path,
         )
         return nifti_path, True
     elif input_path.suffix.lower() in [".gz", ".nii"]:
-        # Already NIfTI
         logger.info(f"Input is NIfTI file")
         return input_path, False
-    elif input_path.suffix.lower() in [".dcm"]:
-        # Single DICOM file - use parent directory
-        logger.info(f"Input is single DICOM file, using parent directory...")
+    elif input_path.suffix.lower() == ".dcm":
+        logger.info(f"Input is single DICOM, using parent folder...")
         if temp_dir is None:
             temp_dir = input_path.parent
         nifti_path = dicom_to_nifti(
@@ -217,54 +162,26 @@ def load_input(input_path: Path, temp_dir: Optional[Path] = None) -> Tuple[Path,
         return nifti_path, True
     else:
         raise ValueError(
-            f"Unsupported input format: {input_path}\n"
-            "Supported formats:\n"
-            "  - NIfTI file (.nii, .nii.gz)\n"
-            "  - DICOM folder (directory containing .dcm files)\n"
-            "  - Single DICOM file (.dcm)"
+            f"Unsupported format: {input_path}\n"
+            "Supported: DICOM folder, .nii, .nii.gz, .dcm"
         )
 
 
 def extract_heart_mask(
     prediction: np.ndarray,
     leaf_to_original: Dict[int, int],
-    include_pericardium: bool = False,
-    include_vessels: bool = False,
     binary: bool = False,
 ) -> Tuple[np.ndarray, Dict[int, str]]:
-    """
-    Extract heart structures from full body segmentation.
-
-    Args:
-        prediction: Full segmentation prediction array
-        leaf_to_original: Mapping from leaf indices to original label indices
-        include_pericardium: Include pericardium in the mask
-        include_vessels: Include aorta and pulmonary artery
-        binary: If True, combine all structures into binary mask
-
-    Returns:
-        Tuple of (heart_mask, label_mapping)
-    """
-    # Create reverse mapping (original index -> leaf index)
+    """Extract heart structures from full body segmentation."""
     original_to_leaf = {v: k for k, v in leaf_to_original.items()}
 
-    # Initialize output mask
     heart_mask = np.zeros_like(prediction, dtype=np.uint8)
     label_mapping = {}
 
     for label_name, info in HEART_LABELS.items():
-        # Skip non-core labels if not requested
-        if not info["is_core"]:
-            if label_name == "pericardium" and not include_pericardium:
-                continue
-            if "aorta" in label_name or "pulmonary" in label_name:
-                if not include_vessels:
-                    continue
-
         original_idx = info["file_index"]
         output_value = info["output_value"] if not binary else 1
 
-        # Find the leaf index that corresponds to this original index
         if original_idx in original_to_leaf:
             leaf_idx = original_to_leaf[original_idx]
             mask_locations = prediction == leaf_idx
@@ -275,7 +192,7 @@ def extract_heart_mask(
                 logger.info(f"  Found {label_name}: {np.sum(mask_locations)} voxels")
 
     if binary:
-        label_mapping = {1: "heart_combined"}
+        label_mapping = {1: "heart"}
 
     return heart_mask, label_mapping
 
@@ -286,26 +203,14 @@ def save_mask(
     output_path: Path,
     label_mapping: Dict[int, str],
 ) -> None:
-    """
-    Save segmentation mask as NIfTI file with proper header.
-
-    Args:
-        mask: Segmentation mask array
-        reference_image: Reference NIfTI image for header/affine
-        output_path: Output file path
-        label_mapping: Mapping of label values to names
-    """
-    # Create NIfTI image with same affine and header as reference
+    """Save segmentation mask as NIfTI file."""
     mask_nifti = nib.Nifti1Image(
         mask.astype(np.uint8),
         affine=reference_image.affine,
         header=reference_image.header.copy()
     )
-
-    # Update data type in header
     mask_nifti.header.set_data_dtype(np.uint8)
 
-    # Save
     nib.save(mask_nifti, output_path)
     logger.info(f"Heart mask saved to {output_path}")
 
@@ -313,10 +218,9 @@ def save_mask(
     label_file = output_path.parent / f"{output_path.stem.replace('.nii', '')}_labels.txt"
     with open(label_file, "w") as f:
         f.write("# Heart Segmentation Labels\n")
-        f.write("# Value: Label Name\n")
         for value, name in sorted(label_mapping.items()):
             f.write(f"{value}: {name}\n")
-    logger.info(f"Label mapping saved to {label_file}")
+    logger.info(f"Labels saved to {label_file}")
 
 
 def run_inference(
@@ -324,45 +228,24 @@ def run_inference(
     output_dir: Path,
     model_file: Path,
     config_file: Path,
-    include_pericardium: bool = False,
-    include_vessels: bool = False,
     binary: bool = False,
     keep_temp: bool = False,
 ) -> Path:
-    """
-    Run heart segmentation inference.
-
-    Args:
-        input_path: Input DICOM folder or NIfTI file
-        output_dir: Output directory
-        model_file: Path to TorchScript model
-        config_file: Path to config pickle file
-        include_pericardium: Include pericardium in output
-        include_vessels: Include vessels in output
-        binary: Create binary mask (all structures combined)
-        keep_temp: Keep temporary files
-
-    Returns:
-        Path to output mask file
-    """
+    """Run heart segmentation inference."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model and config
-    logger.info("Loading model and configuration...")
+    # Load model
+    logger.info("Loading model...")
     with config_file.open("rb") as f:
         config = pickle.load(f)
 
     model = torch.jit.load(model_file)
     model.cuda()
     model.eval()
-
-    # Disable JIT profiling for speed
     torch._C._jit_set_profiling_executor(False)
 
-    # Get leaf to original mapping
     leaf_to_original = get_leaf_to_original_mapping(config["adjacency_matrix"])
 
-    # Setup preprocessing
     pre_processing = get_validation_transforms(
         spacing=config["model"]["voxel_spacing"],
         info=None,
@@ -376,16 +259,14 @@ def run_inference(
         ),
     )
 
-    # Load input (convert DICOM if needed)
+    # Load input
     nifti_path, is_temp = load_input(input_path, output_dir)
 
     try:
-        # Load and preprocess
         logger.info(f"Loading image from {nifti_path}...")
         with allow_missing_keys_mode(pre_processing):
             example = pre_processing({"image": nifti_path})
 
-        # Load reference image for saving
         reference_image = nib.load(nifti_path)
 
         # Run inference
@@ -422,156 +303,99 @@ def run_inference(
 
         # Extract heart mask
         logger.info("Extracting heart structures...")
-        prediction = prediction[0]  # Remove batch dimension
+        prediction = prediction[0]
 
         heart_mask, label_mapping = extract_heart_mask(
             prediction,
             leaf_to_original,
-            include_pericardium=include_pericardium,
-            include_vessels=include_vessels,
             binary=binary,
         )
 
-        # Determine output filename
-        input_name = input_path.stem
+        # Save
+        input_name = input_path.name if input_path.is_dir() else input_path.stem
         if input_name.endswith("_temp"):
             input_name = input_name[:-5]
-        output_name = f"{input_name}_heart_mask.nii.gz"
-        output_path = output_dir / output_name
+        output_path = output_dir / f"{input_name}_heart_mask.nii.gz"
 
-        # Save mask
         save_mask(heart_mask, reference_image, output_path, label_mapping)
 
-        # Print summary
+        # Summary
         logger.info("\n" + "=" * 50)
         logger.info("HEART SEGMENTATION COMPLETE")
         logger.info("=" * 50)
         logger.info(f"Input: {input_path}")
         logger.info(f"Output: {output_path}")
-        logger.info(f"Inference time: {inference_time:.2f}s")
-        logger.info(f"Total heart voxels: {np.sum(heart_mask > 0)}")
-        logger.info("Label values:")
+        logger.info(f"Time: {inference_time:.2f}s")
+        logger.info(f"Total voxels: {np.sum(heart_mask > 0)}")
         for value, name in sorted(label_mapping.items()):
-            count = np.sum(heart_mask == value)
-            logger.info(f"  {value}: {name} ({count} voxels)")
+            logger.info(f"  {value}: {name} ({np.sum(heart_mask == value)} voxels)")
         logger.info("=" * 50)
 
         return output_path
 
     finally:
-        # Cleanup temporary files
         if is_temp and not keep_temp:
             nifti_path.unlink(missing_ok=True)
-            logger.info("Cleaned up temporary files")
+            logger.info("Cleaned up temp files")
 
 
 def main():
     parser = ArgumentParser(
-        description="Heart Segmentation Inference using SALT model",
+        description="Heart Segmentation - segments heart organ from CT",
         epilog="""
 Examples:
-  # Basic usage with DICOM:
-  python infer_heart.py --input /path/to/dicom_folder --output /path/to/output
+  # DICOM folder:
+  python infer_heart.py --input /path/to/dicom_folder --output ./output
 
-  # Basic usage with NIfTI:
-  python infer_heart.py --input /path/to/image.nii.gz --output /path/to/output
+  # NIfTI file:
+  python infer_heart.py --input image.nii.gz --output ./output
 
-  # Binary mask (all heart as single label):
-  python infer_heart.py --input /path/to/input --output /path/to/output --binary
-
-  # Include pericardium and vessels:
-  python infer_heart.py --input /path/to/input --output /path/to/output --include-pericardium --include-vessels
+  # Binary mask:
+  python infer_heart.py --input /path/to/dicom_folder --output ./output --binary
         """
     )
 
-    # Required arguments
     parser.add_argument(
-        "--input", "-i",
-        type=Path,
-        required=True,
-        help="Input DICOM folder or NIfTI file (.nii.gz)"
+        "--input", "-i", type=Path, required=True,
+        help="Input DICOM folder or NIfTI file"
     )
     parser.add_argument(
-        "--output", "-o",
-        type=Path,
-        required=True,
-        help="Output directory for heart mask"
+        "--output", "-o", type=Path, required=True,
+        help="Output directory"
     )
-
-    # Model arguments
     parser.add_argument(
-        "--model-file",
-        type=Path,
+        "--model-file", type=Path,
         default=Path("models/foobar-31/model.pt"),
-        help="Path to TorchScript model file (default: models/foobar-31/model.pt)"
+        help="Path to model file"
     )
     parser.add_argument(
-        "--config-file",
-        type=Path,
+        "--config-file", type=Path,
         default=Path("models/foobar-31/config.pkl"),
-        help="Path to config pickle file (default: models/foobar-31/config.pkl)"
-    )
-
-    # Output options
-    parser.add_argument(
-        "--binary",
-        action="store_true",
-        help="Output binary mask (all heart structures as value 1)"
+        help="Path to config file"
     )
     parser.add_argument(
-        "--include-pericardium",
-        action="store_true",
-        help="Include pericardium in the output mask"
+        "--binary", action="store_true",
+        help="Output binary mask (all heart as value 1)"
     )
     parser.add_argument(
-        "--include-vessels",
-        action="store_true",
-        help="Include aorta and pulmonary artery (pericardium portions) in output"
-    )
-
-    # Other options
-    parser.add_argument(
-        "--keep-temp",
-        action="store_true",
-        help="Keep temporary files (converted NIfTI from DICOM)"
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable verbose output"
+        "--keep-temp", action="store_true",
+        help="Keep temporary files"
     )
 
     args = parser.parse_args()
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    # Validate input
     if not args.input.exists():
         raise FileNotFoundError(f"Input not found: {args.input}")
-
     if not args.model_file.exists():
-        raise FileNotFoundError(
-            f"Model file not found: {args.model_file}\n"
-            "Please ensure you have downloaded the model files.\n"
-            "If using Git LFS, run: git lfs pull"
-        )
-
+        raise FileNotFoundError(f"Model not found: {args.model_file}")
     if not args.config_file.exists():
-        raise FileNotFoundError(
-            f"Config file not found: {args.config_file}\n"
-            "Please ensure you have downloaded the config files.\n"
-            "If using Git LFS, run: git lfs pull"
-        )
+        raise FileNotFoundError(f"Config not found: {args.config_file}")
 
-    # Run inference
     output_path = run_inference(
         input_path=args.input,
         output_dir=args.output,
         model_file=args.model_file,
         config_file=args.config_file,
-        include_pericardium=args.include_pericardium,
-        include_vessels=args.include_vessels,
         binary=args.binary,
         keep_temp=args.keep_temp,
     )
