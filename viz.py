@@ -77,6 +77,7 @@ def load_dicom_folder(dicom_path: Path) -> np.ndarray:
         raise ValueError(f"No DICOM files found in {dicom_path}")
 
     reader.SetFileNames(dicom_names)
+    reader.SetImageIO("GDCMImageIO")  # Explicitly use GDCM for DICOM
     image = reader.Execute()
 
     # Convert to numpy array
