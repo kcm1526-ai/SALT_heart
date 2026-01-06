@@ -24,7 +24,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.widgets import Slider
 
 
-# Color map for heart structures
+# Color map for heart structures (5 core structures)
 HEART_COLORS = {
     0: (0, 0, 0, 0),           # Background (transparent)
     1: (1, 0, 0, 0.6),         # heart_myocardium - Red
@@ -32,20 +32,14 @@ HEART_COLORS = {
     3: (0, 1, 0, 0.6),         # heart_ventricle_left - Green
     4: (1, 1, 0, 0.6),         # heart_atrium_right - Yellow
     5: (1, 0, 1, 0.6),         # heart_ventricle_right - Magenta
-    6: (0, 1, 1, 0.6),         # pericardium - Cyan
-    7: (1, 0.5, 0, 0.6),       # aorta - Orange
-    8: (0.5, 0, 1, 0.6),       # pulmonary artery - Purple
 }
 
 HEART_LABELS = {
-    1: "Heart Myocardium",
+    1: "Myocardium",
     2: "Left Atrium",
     3: "Left Ventricle",
     4: "Right Atrium",
     5: "Right Ventricle",
-    6: "Pericardium",
-    7: "Aorta",
-    8: "Pulmonary Artery",
 }
 
 
@@ -122,7 +116,7 @@ def resize_mask_to_image(mask: np.ndarray, target_shape: tuple) -> np.ndarray:
 
 def create_colormap() -> ListedColormap:
     """Create colormap for mask."""
-    colors = [HEART_COLORS.get(i, (0.5, 0.5, 0.5, 0.5)) for i in range(9)]
+    colors = [HEART_COLORS.get(i, (0.5, 0.5, 0.5, 0.5)) for i in range(6)]
     return ListedColormap(colors)
 
 
@@ -164,7 +158,7 @@ def interactive_viewer(image: np.ndarray, mask: np.ndarray):
     ax_mask = get_slice_axial(mask, axial_idx)
     im_axial = axes[0].imshow(ax_slice, cmap='gray')
     mask_axial = axes[0].imshow(np.ma.masked_where(ax_mask == 0, ax_mask),
-                                 cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+                                 cmap=cmap, alpha=0.5, vmin=0, vmax=5)
     axes[0].set_title(f'Axial (slice {axial_idx}/{nz-1})')
     axes[0].axis('off')
 
@@ -173,7 +167,7 @@ def interactive_viewer(image: np.ndarray, mask: np.ndarray):
     cor_mask = get_slice_coronal(mask, coronal_idx)
     im_coronal = axes[1].imshow(cor_slice, cmap='gray')
     mask_coronal = axes[1].imshow(np.ma.masked_where(cor_mask == 0, cor_mask),
-                                   cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+                                   cmap=cmap, alpha=0.5, vmin=0, vmax=5)
     axes[1].set_title(f'Coronal (slice {coronal_idx}/{ny-1})')
     axes[1].axis('off')
 
@@ -182,7 +176,7 @@ def interactive_viewer(image: np.ndarray, mask: np.ndarray):
     sag_mask = get_slice_sagittal(mask, sagittal_idx)
     im_sagittal = axes[2].imshow(sag_slice, cmap='gray')
     mask_sagittal = axes[2].imshow(np.ma.masked_where(sag_mask == 0, sag_mask),
-                                    cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+                                    cmap=cmap, alpha=0.5, vmin=0, vmax=5)
     axes[2].set_title(f'Sagittal (slice {sagittal_idx}/{nx-1})')
     axes[2].axis('off')
 
@@ -258,7 +252,7 @@ def save_image(image: np.ndarray, mask: np.ndarray, output_path: Path, slice_idx
     ax_slice = get_slice_axial(image_norm, axial_idx)
     ax_mask = get_slice_axial(mask, axial_idx)
     axes[0].imshow(ax_slice, cmap='gray')
-    axes[0].imshow(np.ma.masked_where(ax_mask == 0, ax_mask), cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+    axes[0].imshow(np.ma.masked_where(ax_mask == 0, ax_mask), cmap=cmap, alpha=0.5, vmin=0, vmax=5)
     axes[0].set_title(f'Axial (slice {axial_idx})')
     axes[0].axis('off')
 
@@ -266,7 +260,7 @@ def save_image(image: np.ndarray, mask: np.ndarray, output_path: Path, slice_idx
     cor_slice = get_slice_coronal(image_norm, coronal_idx)
     cor_mask = get_slice_coronal(mask, coronal_idx)
     axes[1].imshow(cor_slice, cmap='gray')
-    axes[1].imshow(np.ma.masked_where(cor_mask == 0, cor_mask), cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+    axes[1].imshow(np.ma.masked_where(cor_mask == 0, cor_mask), cmap=cmap, alpha=0.5, vmin=0, vmax=5)
     axes[1].set_title(f'Coronal (slice {coronal_idx})')
     axes[1].axis('off')
 
@@ -274,7 +268,7 @@ def save_image(image: np.ndarray, mask: np.ndarray, output_path: Path, slice_idx
     sag_slice = get_slice_sagittal(image_norm, sagittal_idx)
     sag_mask = get_slice_sagittal(mask, sagittal_idx)
     axes[2].imshow(sag_slice, cmap='gray')
-    axes[2].imshow(np.ma.masked_where(sag_mask == 0, sag_mask), cmap=cmap, alpha=0.5, vmin=0, vmax=8)
+    axes[2].imshow(np.ma.masked_where(sag_mask == 0, sag_mask), cmap=cmap, alpha=0.5, vmin=0, vmax=5)
     axes[2].set_title(f'Sagittal (slice {sagittal_idx})')
     axes[2].axis('off')
 
