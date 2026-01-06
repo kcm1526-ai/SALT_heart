@@ -3,22 +3,20 @@
 Heart Segmentation Inference Script for SALT
 
 This script performs heart segmentation from CT images (DICOM folder or NIfTI format).
-It segments the heart organ with 5 structures:
-- Heart myocardium
-- Left atrium
-- Left ventricle
-- Right atrium
-- Right ventricle
+Runs full SALT inference, then extracts only heart structures.
 
 Usage:
-    # From DICOM folder (folder containing .dcm files):
+    # From DICOM folder:
     python infer_heart.py --input /path/to/dicom_folder --output /path/to/output
 
     # From NIfTI file:
     python infer_heart.py --input /path/to/image.nii.gz --output /path/to/output
 
     # Binary mask (all heart structures combined as 1):
-    python infer_heart.py --input /path/to/dicom_folder --output /path/to/output --binary
+    python infer_heart.py --input /path/to/dicom_folder --output ./output --binary
+
+    # Show available labels:
+    python infer_heart.py --show-labels
 
 Author: Generated based on SALT framework
 """
@@ -29,7 +27,7 @@ import time
 from argparse import ArgumentParser
 from functools import partial
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import nibabel as nib
@@ -40,6 +38,7 @@ from monai.transforms.utils import allow_missing_keys_mode
 from salt.input_pipeline import (
     IntensityProperties,
     get_validation_transforms,
+    get_postprocess_transforms,
 )
 from salt.utils.inference import sliding_window_inference_with_reduction
 
@@ -51,14 +50,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Heart structure labels (5 core heart structures only)
-HEART_LABELS = {
-    "heart_myocardium": {"file_index": 57, "output_value": 1},
-    "heart_atrium_left": {"file_index": 58, "output_value": 2},
-    "heart_ventricle_left": {"file_index": 59, "output_value": 3},
-    "heart_atrium_right": {"file_index": 60, "output_value": 4},
-    "heart_ventricle_right": {"file_index": 61, "output_value": 5},
-}
+# Heart structure keywords to search for in vocabulary
+HEART_KEYWORDS = [
+    "heart_myocardium",
+    "heart_atrium_left",
+    "heart_ventricle_left",
+    "heart_atrium_right",
+    "heart_ventricle_right",
+    "myocardium",
+    "atrium_left",
+    "ventricle_left",
+    "atrium_right",
+    "ventricle_right",
+]
 
 
 def argmax_leaves(
@@ -67,7 +71,10 @@ def argmax_leaves(
     dim: int = 1,
     pruned: bool = True,
 ) -> torch.Tensor:
-    """Compute argmax over leaf nodes in the label tree."""
+    """Compute argmax over leaf nodes in the label tree.
+
+    This is copied from predict.py to ensure identical behavior.
+    """
     leave_nodes = np.where(adjacency_matrix[1:, 1:].sum(axis=1) == 0)[0]
     indices = np.arange(adjacency_matrix.shape[0] - 1, dtype=np.int32)
     indices = indices[leave_nodes]
@@ -78,41 +85,101 @@ def argmax_leaves(
     return torch.tensor(indices).to(inputs.device)[y_pred_leave_idx]
 
 
-def get_leaf_to_original_mapping(adjacency_matrix: np.ndarray) -> Dict[int, int]:
-    """Create mapping from leaf node indices to original label indices."""
-    leave_nodes = np.where(adjacency_matrix[1:, 1:].sum(axis=1) == 0)[0]
-    return {i: int(leave_nodes[i]) for i in range(len(leave_nodes))}
+def get_leaf_node_info(adjacency_matrix: np.ndarray) -> Tuple[np.ndarray, Dict[int, int]]:
+    """Get leaf node indices and mapping from pruned index to original index.
+
+    Returns:
+        leaf_nodes: Array of original indices that are leaf nodes
+        pruned_to_original: Dict mapping pruned leaf index to original class index
+    """
+    # Find nodes with no children (sum of outgoing edges = 0)
+    leaf_nodes = np.where(adjacency_matrix[1:, 1:].sum(axis=1) == 0)[0]
+
+    # Create mapping: pruned leaf index -> original class index
+    pruned_to_original = {i: int(leaf_nodes[i]) for i in range(len(leaf_nodes))}
+
+    return leaf_nodes, pruned_to_original
+
+
+def find_heart_labels_in_vocabulary(vocabulary: List[Tuple[str, ...]]) -> Dict[str, int]:
+    """Find heart-related labels in the vocabulary.
+
+    Args:
+        vocabulary: List of label tuples, e.g., [('body', 'heart', 'myocardium'), ...]
+
+    Returns:
+        Dict mapping label name to its index in vocabulary (0-indexed, excluding root)
+    """
+    heart_labels = {}
+
+    for idx, label_tuple in enumerate(vocabulary):
+        # Get the last element (most specific label name)
+        label_name = label_tuple[-1] if label_tuple else ""
+        full_path = ",".join(label_tuple)
+
+        # Check if this is a heart-related label
+        for keyword in HEART_KEYWORDS:
+            if keyword in label_name.lower() or keyword in full_path.lower():
+                # Use a clean name
+                clean_name = label_name.replace("_", " ").title()
+                heart_labels[label_name] = idx
+                logger.debug(f"Found heart label: {label_name} at index {idx}")
+                break
+
+    return heart_labels
+
+
+def show_all_labels(config: dict) -> None:
+    """Print all labels in the model vocabulary."""
+    adjacency_matrix = config["adjacency_matrix"]
+    vocabulary = config.get("vocabulary", [])
+
+    leaf_nodes, _ = get_leaf_node_info(adjacency_matrix)
+
+    print("\n" + "=" * 60)
+    print("SALT MODEL LABELS")
+    print("=" * 60)
+
+    if vocabulary:
+        print(f"\nTotal vocabulary size: {len(vocabulary)}")
+        print(f"Number of leaf nodes (segmentable classes): {len(leaf_nodes)}")
+
+        print("\n--- LEAF NODES (output classes) ---")
+        for pruned_idx, original_idx in enumerate(leaf_nodes):
+            if original_idx < len(vocabulary):
+                label = vocabulary[original_idx]
+                label_str = " > ".join(label) if isinstance(label, tuple) else str(label)
+
+                # Highlight heart-related labels
+                is_heart = any(kw in label_str.lower() for kw in ["heart", "myocard", "atrium", "ventricle"])
+                marker = " <-- HEART" if is_heart else ""
+
+                print(f"  [{pruned_idx:3d}] -> original[{original_idx:3d}]: {label_str}{marker}")
+    else:
+        print("\nNo vocabulary found in config. Adjacency matrix shape:", adjacency_matrix.shape)
+        print(f"Number of leaf nodes: {len(leaf_nodes)}")
+        print(f"Leaf node original indices: {leaf_nodes.tolist()}")
+
+    print("=" * 60 + "\n")
 
 
 def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path:
-    """
-    Convert DICOM folder to NIfTI format.
-
-    Args:
-        dicom_path: Path to folder containing DICOM files (with or without .dcm extension)
-        output_path: Optional output path for NIfTI file
-
-    Returns:
-        Path to the created NIfTI file
-    """
+    """Convert DICOM folder to NIfTI format."""
     logger.info(f"Converting DICOM from {dicom_path} to NIfTI...")
 
     reader = sitk.ImageSeriesReader()
     series_ids = sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(dicom_path))
 
     if len(series_ids) > 0:
-        # Found DICOM series using GDCM
         logger.info(f"Found {len(series_ids)} DICOM series")
         dicom_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
             str(dicom_path), series_ids[0]
         )
         logger.info(f"Using series with {len(dicom_names)} slices")
     else:
-        # Try finding DICOM files directly (with or without extension)
         dcm_files = list(dicom_path.glob("*.dcm")) + list(dicom_path.glob("*.DCM"))
 
         if len(dcm_files) == 0:
-            # Try all files in directory (DICOM files often have no extension)
             all_files = sorted([f for f in dicom_path.iterdir() if f.is_file()])
             if len(all_files) == 0:
                 raise ValueError(f"No files found in {dicom_path}")
@@ -128,7 +195,7 @@ def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path
         raise ValueError(f"No DICOM files found in {dicom_path}")
 
     reader.SetFileNames(dicom_names)
-    reader.SetImageIO("GDCMImageIO")  # Explicitly use GDCM for DICOM
+    reader.SetImageIO("GDCMImageIO")
     reader.MetaDataDictionaryArrayUpdateOn()
     reader.LoadPrivateTagsOn()
 
@@ -178,30 +245,87 @@ def load_input(input_path: Path, temp_dir: Optional[Path] = None) -> Tuple[Path,
 
 def extract_heart_mask(
     prediction: np.ndarray,
-    leaf_to_original: Dict[int, int],
+    config: dict,
     binary: bool = False,
 ) -> Tuple[np.ndarray, Dict[int, str]]:
-    """Extract heart structures from full body segmentation."""
-    original_to_leaf = {v: k for k, v in leaf_to_original.items()}
+    """Extract heart structures from full body segmentation.
 
+    Args:
+        prediction: Full segmentation output with pruned leaf indices
+        config: Model config containing adjacency_matrix and vocabulary
+        binary: If True, output binary mask
+
+    Returns:
+        heart_mask: Mask with only heart structures
+        label_mapping: Dict of output value -> label name
+    """
+    adjacency_matrix = config["adjacency_matrix"]
+    vocabulary = config.get("vocabulary", [])
+
+    leaf_nodes, pruned_to_original = get_leaf_node_info(adjacency_matrix)
+
+    # Create reverse mapping: original index -> pruned leaf index
+    original_to_pruned = {v: k for k, v in pruned_to_original.items()}
+
+    # Find heart labels in vocabulary
+    heart_original_indices = {}
+
+    if vocabulary:
+        for original_idx, label_tuple in enumerate(vocabulary):
+            label_name = label_tuple[-1] if label_tuple else ""
+            full_path = ",".join(label_tuple).lower()
+
+            # Check for heart-related keywords
+            if any(kw in full_path for kw in ["heart", "myocard", "atrium", "ventricle"]):
+                # Only include if it's a leaf node (actually segmented)
+                if original_idx in original_to_pruned:
+                    heart_original_indices[label_name] = original_idx
+                    logger.info(f"  Heart label found: {label_name} (original={original_idx}, pruned={original_to_pruned[original_idx]})")
+    else:
+        # Fallback: use known SAROS+TotalSeg indices if no vocabulary
+        logger.warning("No vocabulary in config, using fallback indices")
+        fallback_indices = {
+            "heart_myocardium": 57,
+            "heart_atrium_left": 58,
+            "heart_ventricle_left": 59,
+            "heart_atrium_right": 60,
+            "heart_ventricle_right": 61,
+        }
+        for name, idx in fallback_indices.items():
+            if idx in original_to_pruned:
+                heart_original_indices[name] = idx
+
+    if not heart_original_indices:
+        logger.warning("No heart labels found! Dumping leaf node info for debugging...")
+        for pruned_idx in range(min(10, len(leaf_nodes))):
+            logger.warning(f"  Pruned {pruned_idx} -> Original {leaf_nodes[pruned_idx]}")
+        raise ValueError("Could not find heart labels in model vocabulary")
+
+    # Extract heart mask
     heart_mask = np.zeros_like(prediction, dtype=np.uint8)
     label_mapping = {}
 
-    for label_name, info in HEART_LABELS.items():
-        original_idx = info["file_index"]
-        output_value = info["output_value"] if not binary else 1
+    output_value = 1
+    for label_name, original_idx in sorted(heart_original_indices.items()):
+        pruned_idx = original_to_pruned[original_idx]
+        mask_locations = prediction == pruned_idx
 
-        if original_idx in original_to_leaf:
-            leaf_idx = original_to_leaf[original_idx]
-            mask_locations = prediction == leaf_idx
-
-            if np.any(mask_locations):
+        if np.any(mask_locations):
+            if binary:
+                heart_mask[mask_locations] = 1
+            else:
                 heart_mask[mask_locations] = output_value
                 label_mapping[output_value] = label_name
-                logger.info(f"  Found {label_name}: {np.sum(mask_locations)} voxels")
+                output_value += 1
+
+            voxel_count = np.sum(mask_locations)
+            logger.info(f"  {label_name}: {voxel_count} voxels (pruned_idx={pruned_idx})")
 
     if binary:
         label_mapping = {1: "heart"}
+
+    total_heart_voxels = np.sum(heart_mask > 0)
+    logger.info(f"  Total heart voxels: {total_heart_voxels}")
 
     return heart_mask, label_mapping
 
@@ -243,17 +367,22 @@ def run_inference(
     """Run heart segmentation inference."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model
-    logger.info("Loading model...")
+    # Load config
+    logger.info("Loading config...")
     with config_file.open("rb") as f:
         config = pickle.load(f)
 
+    # Debug: show what's in config
+    logger.info(f"Config keys: {list(config.keys())}")
+    if "vocabulary" in config:
+        logger.info(f"Vocabulary size: {len(config['vocabulary'])}")
+
+    # Load model
+    logger.info("Loading model...")
     model = torch.jit.load(model_file)
     model.cuda()
     model.eval()
     torch._C._jit_set_profiling_executor(False)
-
-    leaf_to_original = get_leaf_to_original_mapping(config["adjacency_matrix"])
 
     pre_processing = get_validation_transforms(
         spacing=config["model"]["voxel_spacing"],
@@ -278,7 +407,7 @@ def run_inference(
 
         reference_image = nib.load(nifti_path)
 
-        # Run inference
+        # Run inference (same as predict.py)
         logger.info("Running inference...")
         start_time = time.time()
 
@@ -310,13 +439,17 @@ def run_inference(
         inference_time = time.time() - start_time
         logger.info(f"Inference completed in {inference_time:.2f} seconds")
 
+        # Debug: show prediction stats
+        prediction = prediction[0]  # Remove batch dimension
+        unique_values = np.unique(prediction)
+        logger.info(f"Prediction shape: {prediction.shape}")
+        logger.info(f"Unique values in prediction: {len(unique_values)} (range: {unique_values.min()} - {unique_values.max()})")
+
         # Extract heart mask
         logger.info("Extracting heart structures...")
-        prediction = prediction[0]
-
         heart_mask, label_mapping = extract_heart_mask(
             prediction,
-            leaf_to_original,
+            config,
             binary=binary,
         )
 
@@ -361,15 +494,18 @@ Examples:
 
   # Binary mask:
   python infer_heart.py --input /path/to/dicom_folder --output ./output --binary
+
+  # Show all labels in model:
+  python infer_heart.py --show-labels
         """
     )
 
     parser.add_argument(
-        "--input", "-i", type=Path, required=True,
+        "--input", "-i", type=Path,
         help="Input DICOM folder or NIfTI file"
     )
     parser.add_argument(
-        "--output", "-o", type=Path, required=True,
+        "--output", "-o", type=Path,
         help="Output directory"
     )
     parser.add_argument(
@@ -390,15 +526,33 @@ Examples:
         "--keep-temp", action="store_true",
         help="Keep temporary files"
     )
+    parser.add_argument(
+        "--show-labels", action="store_true",
+        help="Show all labels in the model and exit"
+    )
 
     args = parser.parse_args()
+
+    if not args.config_file.exists():
+        raise FileNotFoundError(f"Config not found: {args.config_file}")
+
+    # Show labels mode
+    if args.show_labels:
+        with args.config_file.open("rb") as f:
+            config = pickle.load(f)
+        show_all_labels(config)
+        return
+
+    # Normal inference mode
+    if args.input is None:
+        parser.error("--input is required for inference")
+    if args.output is None:
+        parser.error("--output is required for inference")
 
     if not args.input.exists():
         raise FileNotFoundError(f"Input not found: {args.input}")
     if not args.model_file.exists():
         raise FileNotFoundError(f"Model not found: {args.model_file}")
-    if not args.config_file.exists():
-        raise FileNotFoundError(f"Config not found: {args.config_file}")
 
     output_path = run_inference(
         input_path=args.input,
