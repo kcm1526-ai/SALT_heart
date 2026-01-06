@@ -89,7 +89,7 @@ def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path
     Convert DICOM folder to NIfTI format.
 
     Args:
-        dicom_path: Path to folder containing .dcm files
+        dicom_path: Path to folder containing DICOM files (with or without .dcm extension)
         output_path: Optional output path for NIfTI file
 
     Returns:
@@ -100,24 +100,32 @@ def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path
     reader = sitk.ImageSeriesReader()
     series_ids = sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(dicom_path))
 
-    if len(series_ids) == 0:
-        # Try finding .dcm files directly
-        dcm_files = list(dicom_path.glob("*.dcm")) + list(dicom_path.glob("*.DCM"))
-        if len(dcm_files) == 0:
-            all_files = [f for f in dicom_path.iterdir() if f.is_file()]
-            raise ValueError(
-                f"No DICOM files found in {dicom_path}. "
-                f"Found {len(all_files)} files but none recognized as DICOM."
-            )
-        dcm_files = sorted(dcm_files, key=lambda x: x.name)
-        dicom_names = [str(f) for f in dcm_files]
-        logger.info(f"Found {len(dicom_names)} DICOM files")
-    else:
+    if len(series_ids) > 0:
+        # Found DICOM series using GDCM
         logger.info(f"Found {len(series_ids)} DICOM series")
         dicom_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
             str(dicom_path), series_ids[0]
         )
         logger.info(f"Using series with {len(dicom_names)} slices")
+    else:
+        # Try finding DICOM files directly (with or without extension)
+        dcm_files = list(dicom_path.glob("*.dcm")) + list(dicom_path.glob("*.DCM"))
+
+        if len(dcm_files) == 0:
+            # Try all files in directory (DICOM files often have no extension)
+            all_files = sorted([f for f in dicom_path.iterdir() if f.is_file()])
+            if len(all_files) == 0:
+                raise ValueError(f"No files found in {dicom_path}")
+
+            logger.info(f"No .dcm files found, trying {len(all_files)} files without extension...")
+            dicom_names = [str(f) for f in all_files]
+        else:
+            dcm_files = sorted(dcm_files, key=lambda x: x.name)
+            dicom_names = [str(f) for f in dcm_files]
+            logger.info(f"Found {len(dicom_names)} .dcm files")
+
+    if len(dicom_names) == 0:
+        raise ValueError(f"No DICOM files found in {dicom_path}")
 
     reader.SetFileNames(dicom_names)
     reader.MetaDataDictionaryArrayUpdateOn()
