@@ -1,0 +1,7 @@
+# Heart Segmentation Labels
+# Value: Label Name
+1: heart_myocardium (38,355 voxels)
+2: heart_atrium_left (21,308 voxels)
+3: heart_ventricle_left (30,166 voxels)
+4: heart_atrium_right (30,734 voxels)
+5: heart_ventricle_right (43,387 voxels)

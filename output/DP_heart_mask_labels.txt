@@ -1,0 +1,5 @@
+# Heart Segmentation Labels
+# Value: Label Name
+2: heart_atrium_left
+3: heart_ventricle_left
+4: heart_atrium_right
