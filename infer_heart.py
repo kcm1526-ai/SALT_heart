@@ -30,7 +30,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-import nibabel as nib
 import SimpleITK as sitk
 import torch
 from monai.transforms import SaveImage
@@ -41,6 +40,7 @@ from salt.input_pipeline import (
     get_validation_transforms,
     get_postprocess_transforms,
 )
+from salt.core.label_tree import LabelTree
 from salt.utils.inference import sliding_window_inference_with_reduction
 
 # Configure logging
@@ -50,31 +50,74 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Path to labels file
-LABELS_FILE = Path(__file__).parent / "labels" / "saros+totalseg" / "labels.txt"
+# Path to tree-labels file (defines the hierarchical structure)
+TREE_LABELS_FILE = Path(__file__).parent / "labels" / "saros+totalseg" / "tree-labels.txt"
 
-# Heart structure indices in saros+totalseg labels (0-indexed)
-# These are the original class indices, not pruned leaf indices
-HEART_ORIGINAL_INDICES = {
-    57: "heart_myocardium",
-    58: "heart_atrium_left",
-    59: "heart_ventricle_left",
-    60: "heart_atrium_right",
-    61: "heart_ventricle_right",
-}
+# Heart structure names to search for
+HEART_LABEL_NAMES = [
+    "heart_myocardium",
+    "heart_atrium_left",
+    "heart_ventricle_left",
+    "heart_atrium_right",
+    "heart_ventricle_right",
+]
 
 
-def load_labels(labels_file: Path = LABELS_FILE) -> List[str]:
-    """Load label names from labels.txt file."""
-    if not labels_file.exists():
-        logger.warning(f"Labels file not found: {labels_file}")
+def load_tree_labels(tree_labels_file: Path = TREE_LABELS_FILE) -> List[Tuple[str, ...]]:
+    """Load tree labels from tree-labels.txt file.
+
+    Returns list of label tuples, e.g., [('body', 'heart', 'myocardium'), ...]
+    """
+    if not tree_labels_file.exists():
+        logger.warning(f"Tree labels file not found: {tree_labels_file}")
         return []
 
-    with open(labels_file, "r") as f:
-        labels = [line.strip() for line in f.readlines()]
+    labels = []
+    with open(tree_labels_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line and line != "-":
+                # Split by comma to get path components
+                parts = tuple(line.split(","))
+                labels.append(parts)
+            else:
+                labels.append(None)  # Placeholder for skipped lines
 
-    logger.info(f"Loaded {len(labels)} labels from {labels_file}")
+    logger.info(f"Loaded {len([l for l in labels if l])} labels from {tree_labels_file}")
     return labels
+
+
+def build_label_tree(tree_labels: List[Tuple[str, ...]]) -> LabelTree:
+    """Build a LabelTree from tree labels (same as during training)."""
+    tree = LabelTree()
+
+    for label in tree_labels:
+        if label is not None:
+            tree.add(*label)
+
+    # Sort the tree (same as during training)
+    tree.optimize()
+
+    return tree
+
+
+def find_heart_indices(tree: LabelTree) -> Dict[str, int]:
+    """Find indices of heart labels in the label tree vocabulary.
+
+    Returns dict mapping label name to vocabulary index (0-indexed, excluding root).
+    """
+    heart_indices = {}
+    vocabulary = tree.labels  # List of label tuples (excluding root)
+
+    for idx, label_tuple in enumerate(vocabulary):
+        # Get the last element (most specific label name)
+        label_name = label_tuple[-1] if label_tuple else ""
+
+        if label_name in HEART_LABEL_NAMES:
+            heart_indices[label_name] = idx
+            logger.info(f"Found heart label: {label_name} at index {idx}")
+
+    return heart_indices
 
 
 def argmax_leaves(
@@ -112,37 +155,62 @@ def get_leaf_node_info(adjacency_matrix: np.ndarray) -> Tuple[np.ndarray, Dict[i
     return leaf_nodes, pruned_to_original, original_to_pruned
 
 
-def show_all_labels(config: dict, labels: List[str]) -> None:
+def show_all_labels(config: dict) -> None:
     """Print all labels in the model."""
     adjacency_matrix = config["adjacency_matrix"]
     leaf_nodes, pruned_to_original, original_to_pruned = get_leaf_node_info(adjacency_matrix)
 
-    print("\n" + "=" * 70)
+    # Build label tree to get vocabulary
+    tree_labels = load_tree_labels()
+    tree = build_label_tree(tree_labels)
+    vocabulary = tree.labels
+
+    # Find heart indices
+    heart_indices = find_heart_indices(tree)
+
+    print("\n" + "=" * 80)
     print("SALT MODEL LABELS (saros+totalseg)")
-    print("=" * 70)
-    print(f"\nTotal classes: {len(labels)}")
+    print("=" * 80)
+    print(f"\nTotal vocabulary size: {len(vocabulary)}")
+    print(f"Adjacency matrix shape: {adjacency_matrix.shape}")
     print(f"Number of leaf nodes (segmentable classes): {len(leaf_nodes)}")
 
     print("\n--- LEAF NODES (output classes) ---")
-    print(f"{'Pruned':>8} {'Original':>10} {'Label Name':<40} {'Heart?'}")
-    print("-" * 70)
+    print(f"{'Pruned':>8} {'Original':>10} {'Label Path':<55} {'Heart?'}")
+    print("-" * 80)
 
     for pruned_idx in range(len(leaf_nodes)):
         original_idx = pruned_to_original[pruned_idx]
-        label_name = labels[original_idx] if original_idx < len(labels) else f"unknown_{original_idx}"
-        is_heart = original_idx in HEART_ORIGINAL_INDICES
-        marker = "<-- HEART" if is_heart else ""
-        print(f"{pruned_idx:>8} {original_idx:>10} {label_name:<40} {marker}")
-
-    print("\n--- HEART LABELS ---")
-    for orig_idx, name in HEART_ORIGINAL_INDICES.items():
-        if orig_idx in original_to_pruned:
-            pruned_idx = original_to_pruned[orig_idx]
-            print(f"  {name}: original={orig_idx}, pruned={pruned_idx}")
+        if original_idx < len(vocabulary):
+            label_tuple = vocabulary[original_idx]
+            label_path = " > ".join(label_tuple)
+            label_name = label_tuple[-1] if label_tuple else ""
         else:
-            print(f"  {name}: original={orig_idx}, NOT A LEAF NODE!")
+            label_path = f"unknown_{original_idx}"
+            label_name = ""
 
-    print("=" * 70 + "\n")
+        is_heart = label_name in HEART_LABEL_NAMES
+        marker = "<-- HEART" if is_heart else ""
+
+        # Truncate long paths
+        if len(label_path) > 55:
+            label_path = "..." + label_path[-52:]
+
+        print(f"{pruned_idx:>8} {original_idx:>10} {label_path:<55} {marker}")
+
+    print("\n--- HEART LABELS SUMMARY ---")
+    for name in HEART_LABEL_NAMES:
+        if name in heart_indices:
+            orig_idx = heart_indices[name]
+            if orig_idx in original_to_pruned:
+                pruned_idx = original_to_pruned[orig_idx]
+                print(f"  {name}: original={orig_idx}, pruned={pruned_idx}")
+            else:
+                print(f"  {name}: original={orig_idx}, NOT A LEAF NODE!")
+        else:
+            print(f"  {name}: NOT FOUND IN VOCABULARY!")
+
+    print("=" * 80 + "\n")
 
 
 def dicom_to_nifti(dicom_path: Path, output_path: Optional[Path] = None) -> Path:
@@ -227,6 +295,7 @@ def load_input(input_path: Path, temp_dir: Optional[Path] = None) -> Tuple[Path,
 
 def extract_heart_from_prediction(
     prediction: np.ndarray,
+    heart_indices: Dict[str, int],
     original_to_pruned: Dict[int, int],
     binary: bool = False,
 ) -> Tuple[np.ndarray, Dict[int, str]]:
@@ -234,6 +303,7 @@ def extract_heart_from_prediction(
 
     Args:
         prediction: Full segmentation output with pruned leaf indices
+        heart_indices: Dict mapping heart label name to original index
         original_to_pruned: Mapping from original class index to pruned leaf index
         binary: If True, output binary mask
 
@@ -245,7 +315,13 @@ def extract_heart_from_prediction(
     label_mapping = {}
 
     output_value = 1
-    for original_idx, label_name in sorted(HEART_ORIGINAL_INDICES.items()):
+    for label_name in HEART_LABEL_NAMES:
+        if label_name not in heart_indices:
+            logger.warning(f"  {label_name}: not found in vocabulary, skipping")
+            continue
+
+        original_idx = heart_indices[label_name]
+
         if original_idx not in original_to_pruned:
             logger.warning(f"  {label_name} (idx={original_idx}) is not a leaf node, skipping")
             continue
@@ -262,9 +338,9 @@ def extract_heart_from_prediction(
                 label_mapping[output_value] = label_name
                 output_value += 1
 
-            logger.info(f"  {label_name}: {voxel_count:,} voxels (pruned_idx={pruned_idx})")
+            logger.info(f"  {label_name}: {voxel_count:,} voxels (original={original_idx}, pruned={pruned_idx})")
         else:
-            logger.info(f"  {label_name}: 0 voxels (pruned_idx={pruned_idx})")
+            logger.info(f"  {label_name}: 0 voxels (original={original_idx}, pruned={pruned_idx})")
 
     if binary:
         label_mapping = {1: "heart"}
@@ -293,6 +369,17 @@ def run_inference(
 
     logger.info(f"Config keys: {list(config.keys())}")
 
+    # Build label tree from tree-labels.txt (same as during training)
+    logger.info("Building label tree...")
+    tree_labels = load_tree_labels()
+    tree = build_label_tree(tree_labels)
+
+    # Find heart label indices in the vocabulary
+    heart_indices = find_heart_indices(tree)
+
+    if not heart_indices:
+        raise ValueError("Could not find any heart labels in vocabulary!")
+
     # Get leaf node mappings
     adjacency_matrix = config["adjacency_matrix"]
     leaf_nodes, pruned_to_original, original_to_pruned = get_leaf_node_info(adjacency_matrix)
@@ -300,11 +387,15 @@ def run_inference(
 
     # Verify heart labels are leaf nodes
     logger.info("Heart label indices:")
-    for orig_idx, name in HEART_ORIGINAL_INDICES.items():
-        if orig_idx in original_to_pruned:
-            logger.info(f"  {name}: original={orig_idx} -> pruned={original_to_pruned[orig_idx]}")
+    for name in HEART_LABEL_NAMES:
+        if name in heart_indices:
+            orig_idx = heart_indices[name]
+            if orig_idx in original_to_pruned:
+                logger.info(f"  {name}: original={orig_idx} -> pruned={original_to_pruned[orig_idx]}")
+            else:
+                logger.warning(f"  {name}: original={orig_idx} -> NOT A LEAF NODE!")
         else:
-            logger.warning(f"  {name}: original={orig_idx} -> NOT A LEAF NODE!")
+            logger.warning(f"  {name}: NOT FOUND IN VOCABULARY!")
 
     # Load model
     logger.info("Loading model...")
@@ -368,7 +459,7 @@ def run_inference(
         inference_time = time.time() - start_time
         logger.info(f"Inference completed in {inference_time:.2f} seconds")
 
-        # Apply post-processing (same as predict.py - resamples back to original space)
+        # Apply post-processing (same as predict.py - includes KeepLargestConnectedComponent)
         logger.info("Applying post-processing...")
         postprocess = get_postprocess_transforms(output_dir=None)
         processed = postprocess({
@@ -387,6 +478,7 @@ def run_inference(
         logger.info("Extracting heart structures...")
         heart_mask, label_mapping = extract_heart_from_prediction(
             prediction_np,
+            heart_indices,
             original_to_pruned,
             binary=binary,
         )
@@ -502,14 +594,11 @@ Examples:
     if not args.config_file.exists():
         raise FileNotFoundError(f"Config not found: {args.config_file}")
 
-    # Load labels
-    labels = load_labels()
-
     # Show labels mode
     if args.show_labels:
         with args.config_file.open("rb") as f:
             config = pickle.load(f)
-        show_all_labels(config, labels)
+        show_all_labels(config)
         return
 
     # Normal inference mode
