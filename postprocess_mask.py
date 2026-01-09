@@ -2,13 +2,18 @@
 """
 Post-process segmentation masks to remove small disconnected objects.
 
+Uses nibabel (same as inference script) to avoid coordinate system mismatches.
+
 Usage:
     python postprocess_mask.py --input mask.nii.gz --output mask_clean.nii.gz --keep 2
 """
 
 import argparse
 from pathlib import Path
-import SimpleITK as sitk
+
+import nibabel as nib
+import numpy as np
+from scipy import ndimage
 
 
 def main():
@@ -22,52 +27,61 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading: {args.input}")
-    img = sitk.ReadImage(str(args.input))
 
-    print(f"  Size: {img.GetSize()}")
-    print(f"  Spacing: {img.GetSpacing()}")
-    print(f"  Origin: {img.GetOrigin()}")
+    # Load with nibabel (same library used to save the mask in inference)
+    img = nib.load(args.input)
+    data = img.get_fdata()
 
-    # Binary threshold to get mask of all non-zero voxels
-    binary = sitk.BinaryThreshold(img, lowerThreshold=1, upperThreshold=255)
+    print(f"  Shape: {data.shape}")
+    print(f"  Dtype: {data.dtype}")
+    print(f"  Non-zero voxels: {np.sum(data > 0):,}")
 
-    # Connected component labeling
-    labeled = sitk.ConnectedComponent(binary, True)  # True = fully connected (26-connectivity)
+    # Find connected components
+    structure = ndimage.generate_binary_structure(3, 3)  # 26-connectivity
+    labeled, num_components = ndimage.label(data > 0, structure=structure)
 
-    # Relabel components by size (largest = 1, second = 2, etc.)
-    relabeled = sitk.RelabelComponent(labeled, sortByObjectSize=True)
+    print(f"  Found {num_components} connected components")
 
-    # Get stats
-    stats = sitk.LabelShapeStatisticsImageFilter()
-    stats.Execute(relabeled)
+    if num_components <= args.keep:
+        print("  Nothing to remove, copying as-is")
+        nib.save(img, args.output)
+        print(f"Saved: {args.output}")
+        return
 
-    labels = stats.GetLabels()
-    print(f"  Found {len(labels)} connected components")
+    # Get component sizes
+    component_sizes = ndimage.sum(data > 0, labeled, range(1, num_components + 1))
 
-    if len(labels) > 0:
-        print("  Component sizes (sorted by size):")
-        for i, label in enumerate(labels):
-            size = stats.GetNumberOfPixels(label)
-            marker = " <-- KEEP" if i < args.keep else " <-- REMOVE"
-            print(f"    #{i+1} (label {label}): {size:,} voxels{marker}")
+    # Create list of (component_id, size) and sort by size descending
+    sizes_list = [(i + 1, size) for i, size in enumerate(component_sizes)]
+    sizes_list.sort(key=lambda x: x[1], reverse=True)
 
-    # Create mask to keep only the N largest components (labels 1 to N)
-    if len(labels) <= args.keep:
-        print(f"  Nothing to remove, copying input to output")
-        sitk.WriteImage(img, str(args.output))
-    else:
-        # Keep labels 1 through args.keep (since relabeled by size, 1=largest)
-        keep_mask = sitk.BinaryThreshold(relabeled,
-                                          lowerThreshold=1,
-                                          upperThreshold=args.keep)
+    print("  Component sizes:")
+    for i, (comp_id, size) in enumerate(sizes_list):
+        marker = " <-- KEEP" if i < args.keep else " <-- REMOVE"
+        print(f"    #{i+1}: {int(size):,} voxels{marker}")
 
-        # Mask the original image - this preserves original label values
-        output = sitk.Mask(img, keep_mask)
+    # Create mask: 1 where we keep, 0 where we remove
+    keep_ids = set(comp_id for comp_id, _ in sizes_list[:args.keep])
+    keep_mask = np.isin(labeled, list(keep_ids))
 
-        print(f"\nSaving: {args.output}")
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        sitk.WriteImage(output, str(args.output))
+    # Zero out removed voxels (keep original values where mask is True)
+    output_data = data * keep_mask
 
+    removed = np.sum(data > 0) - np.sum(output_data > 0)
+    print(f"  Removed {int(removed):,} voxels")
+
+    # Save with EXACT same affine and header
+    output_img = nib.Nifti1Image(
+        output_data.astype(img.get_data_dtype()),
+        affine=img.affine,
+        header=img.header
+    )
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(output_img, args.output)
+
+    print(f"Saved: {args.output}")
+    print(f"  Final non-zero voxels: {np.sum(output_data > 0):,}")
     print("Done!")
 
 
