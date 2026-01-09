@@ -2,7 +2,7 @@
 """
 Post-process segmentation masks to remove small disconnected objects.
 
-ONLY deletes small objects - does NOT change position, affine, or any spatial info.
+ONLY deletes small objects - does NOT change position, orientation, or any spatial info.
 
 Usage:
     # Keep only the largest object:
@@ -15,8 +15,8 @@ Usage:
 import argparse
 from pathlib import Path
 
-import nibabel as nib
 import numpy as np
+import SimpleITK as sitk
 from scipy import ndimage
 
 
@@ -25,15 +25,7 @@ def remove_small_objects(mask_data: np.ndarray, keep_n: int = 1) -> np.ndarray:
     Remove small disconnected objects, keeping only the N largest.
 
     Only zeros out voxels - does NOT change anything else.
-
-    Args:
-        mask_data: Input mask array
-        keep_n: Number of largest components to keep
-
-    Returns:
-        Same array with small objects set to 0
     """
-    # Work on binary version to find components
     binary = mask_data > 0
 
     if np.sum(binary) == 0:
@@ -64,12 +56,8 @@ def remove_small_objects(mask_data: np.ndarray, keep_n: int = 1) -> np.ndarray:
         marker = " <-- KEEP" if i < keep_n else " <-- REMOVE"
         print(f"    #{i+1}: {size:,} voxels{marker}")
 
-    # Get labels to keep
-    keep_labels = set(comp_id for comp_id, _ in component_sizes[:keep_n])
-
-    # Create output - copy original and zero out removed components
+    # Zero out small components in-place
     output = mask_data.copy()
-
     for comp_id, size in component_sizes[keep_n:]:
         output[labeled == comp_id] = 0
 
@@ -91,15 +79,16 @@ def main():
 
     print(f"Loading: {args.input}")
 
-    # Load NIfTI
-    img = nib.load(args.input)
+    # Load with SimpleITK (preserves all spatial metadata perfectly)
+    img = sitk.ReadImage(str(args.input))
 
-    # Get data as same dtype
-    original_dtype = img.get_data_dtype()
-    mask_data = np.asarray(img.dataobj)  # Preserves original dtype
+    # Get array (SimpleITK uses zyx order)
+    mask_data = sitk.GetArrayFromImage(img)
 
     print(f"  Shape: {mask_data.shape}")
-    print(f"  Dtype: {mask_data.dtype}")
+    print(f"  Spacing: {img.GetSpacing()}")
+    print(f"  Origin: {img.GetOrigin()}")
+    print(f"  Direction: {img.GetDirection()}")
     print(f"  Non-zero voxels: {np.sum(mask_data > 0):,}")
     print(f"  Unique values: {np.unique(mask_data).tolist()}")
 
@@ -107,18 +96,16 @@ def main():
     print(f"\nRemoving small objects (keeping {args.keep} largest)...")
     cleaned = remove_small_objects(mask_data, keep_n=args.keep)
 
-    # Save with EXACT same affine and header
+    # Convert back to SimpleITK image
+    output_img = sitk.GetImageFromArray(cleaned)
+
+    # Copy ALL spatial metadata from original
+    output_img.CopyInformation(img)
+
+    # Save
     print(f"\nSaving: {args.output}")
-
-    # Create new image with same spatial info
-    output_img = nib.Nifti1Image(
-        cleaned.astype(original_dtype),
-        affine=img.affine.copy(),  # Copy to be safe
-        header=img.header.copy()   # Copy to be safe
-    )
-
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    nib.save(output_img, args.output)
+    sitk.WriteImage(output_img, str(args.output))
 
     print(f"  Final non-zero voxels: {np.sum(cleaned > 0):,}")
     print("Done!")
