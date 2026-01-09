@@ -2,7 +2,7 @@
 """
 Post-process segmentation masks to remove small disconnected objects.
 
-Uses connected component analysis to keep only the largest objects.
+ONLY deletes small objects - does NOT change position, affine, or any spatial info.
 
 Usage:
     # Keep only the largest object:
@@ -10,298 +10,118 @@ Usage:
 
     # Keep largest 2 objects:
     python postprocess_mask.py --input mask.nii.gz --output mask_clean.nii.gz --keep 2
-
-    # Keep objects with at least 1000 voxels:
-    python postprocess_mask.py --input mask.nii.gz --output mask_clean.nii.gz --min-size 1000
-
-    # Process each label separately (for multi-label masks):
-    python postprocess_mask.py --input mask.nii.gz --output mask_clean.nii.gz --per-label
 """
 
 import argparse
 from pathlib import Path
-from typing import Optional, Tuple
 
 import nibabel as nib
 import numpy as np
 from scipy import ndimage
 
 
-def get_connected_components(mask: np.ndarray) -> Tuple[np.ndarray, int]:
+def remove_small_objects(mask_data: np.ndarray, keep_n: int = 1) -> np.ndarray:
     """
-    Find connected components in a binary mask.
+    Remove small disconnected objects, keeping only the N largest.
+
+    Only zeros out voxels - does NOT change anything else.
 
     Args:
-        mask: Binary mask (0 and non-zero values)
+        mask_data: Input mask array
+        keep_n: Number of largest components to keep
 
     Returns:
-        labeled_array: Array where each component has a unique label
-        num_components: Number of components found
+        Same array with small objects set to 0
     """
-    # Use 26-connectivity (3D diagonal connections)
+    # Work on binary version to find components
+    binary = mask_data > 0
+
+    if np.sum(binary) == 0:
+        print("  No non-zero voxels found")
+        return mask_data
+
+    # Find connected components (26-connectivity for 3D)
     structure = ndimage.generate_binary_structure(3, 3)
-    labeled_array, num_components = ndimage.label(mask > 0, structure=structure)
-    return labeled_array, num_components
+    labeled, num_components = ndimage.label(binary, structure=structure)
 
+    print(f"  Found {num_components} connected components")
 
-def get_component_sizes(labeled_array: np.ndarray, num_components: int) -> dict:
-    """
-    Get the size (voxel count) of each connected component.
+    if num_components <= keep_n:
+        print(f"  Nothing to remove (keeping all {num_components})")
+        return mask_data
 
-    Args:
-        labeled_array: Array from ndimage.label
-        num_components: Number of components
-
-    Returns:
-        Dict mapping component label to size
-    """
-    sizes = {}
+    # Get size of each component
+    component_sizes = []
     for i in range(1, num_components + 1):
-        sizes[i] = np.sum(labeled_array == i)
-    return sizes
+        size = np.sum(labeled == i)
+        component_sizes.append((i, size))
 
+    # Sort by size descending
+    component_sizes.sort(key=lambda x: x[1], reverse=True)
 
-def keep_largest_components(
-    mask: np.ndarray,
-    keep_n: int = 1,
-    min_size: Optional[int] = None,
-    verbose: bool = True
-) -> np.ndarray:
-    """
-    Keep only the largest connected components in a binary mask.
+    print("  Component sizes:")
+    for i, (comp_id, size) in enumerate(component_sizes):
+        marker = " <-- KEEP" if i < keep_n else " <-- REMOVE"
+        print(f"    #{i+1}: {size:,} voxels{marker}")
 
-    Args:
-        mask: Input mask (can be binary or have a single non-zero value)
-        keep_n: Number of largest components to keep
-        min_size: Minimum size (voxels) to keep a component (overrides keep_n)
-        verbose: Print component info
+    # Get labels to keep
+    keep_labels = set(comp_id for comp_id, _ in component_sizes[:keep_n])
 
-    Returns:
-        Cleaned mask with only largest components
-    """
-    if np.sum(mask > 0) == 0:
-        return mask
+    # Create output - copy original and zero out removed components
+    output = mask_data.copy()
 
-    # Get connected components
-    labeled_array, num_components = get_connected_components(mask)
+    for comp_id, size in component_sizes[keep_n:]:
+        output[labeled == comp_id] = 0
 
-    if verbose:
-        print(f"  Found {num_components} connected components")
+    removed = np.sum(mask_data > 0) - np.sum(output > 0)
+    print(f"  Removed {removed:,} voxels")
 
-    if num_components <= 1:
-        return mask
-
-    # Get component sizes
-    sizes = get_component_sizes(labeled_array, num_components)
-
-    # Sort by size (descending)
-    sorted_components = sorted(sizes.items(), key=lambda x: x[1], reverse=True)
-
-    if verbose:
-        print("  Component sizes:")
-        for label, size in sorted_components[:10]:  # Show top 10
-            print(f"    Component {label}: {size:,} voxels")
-        if len(sorted_components) > 10:
-            print(f"    ... and {len(sorted_components) - 10} more")
-
-    # Determine which components to keep
-    if min_size is not None:
-        # Keep all components >= min_size
-        keep_labels = [label for label, size in sorted_components if size >= min_size]
-        if verbose:
-            print(f"  Keeping {len(keep_labels)} components with >= {min_size} voxels")
-    else:
-        # Keep top N largest
-        keep_labels = [label for label, size in sorted_components[:keep_n]]
-        if verbose:
-            print(f"  Keeping {len(keep_labels)} largest components")
-
-    # Create output mask
-    output_mask = np.zeros_like(mask)
-    original_value = mask[mask > 0][0] if np.any(mask > 0) else 1
-
-    for label in keep_labels:
-        output_mask[labeled_array == label] = original_value
-
-    removed_voxels = np.sum(mask > 0) - np.sum(output_mask > 0)
-    if verbose:
-        print(f"  Removed {removed_voxels:,} voxels ({100*removed_voxels/np.sum(mask > 0):.1f}%)")
-
-    return output_mask
-
-
-def postprocess_multilabel_mask(
-    mask: np.ndarray,
-    keep_n: int = 1,
-    min_size: Optional[int] = None,
-    per_label: bool = False,
-    verbose: bool = True
-) -> np.ndarray:
-    """
-    Post-process a multi-label segmentation mask.
-
-    Args:
-        mask: Input mask with multiple label values
-        keep_n: Number of largest components to keep
-        min_size: Minimum size to keep
-        per_label: If True, process each label separately
-        verbose: Print info
-
-    Returns:
-        Cleaned mask
-    """
-    unique_labels = np.unique(mask)
-    unique_labels = unique_labels[unique_labels > 0]  # Exclude background
-
-    if verbose:
-        print(f"Found {len(unique_labels)} unique labels: {unique_labels.tolist()}")
-
-    if per_label:
-        # Process each label separately
-        output_mask = np.zeros_like(mask)
-
-        for label in unique_labels:
-            if verbose:
-                print(f"\nProcessing label {label}:")
-
-            binary_mask = (mask == label).astype(np.uint8)
-            cleaned = keep_largest_components(
-                binary_mask,
-                keep_n=keep_n,
-                min_size=min_size,
-                verbose=verbose
-            )
-            output_mask[cleaned > 0] = label
-
-        return output_mask
-    else:
-        # Process all labels together as one mask
-        if verbose:
-            print("\nProcessing all labels together:")
-
-        binary_mask = (mask > 0).astype(np.uint8)
-        labeled_array, num_components = get_connected_components(binary_mask)
-
-        if verbose:
-            print(f"  Found {num_components} connected components")
-
-        if num_components <= 1:
-            return mask
-
-        # Get component sizes
-        sizes = get_component_sizes(labeled_array, num_components)
-        sorted_components = sorted(sizes.items(), key=lambda x: x[1], reverse=True)
-
-        if verbose:
-            print("  Component sizes:")
-            for label, size in sorted_components[:10]:
-                print(f"    Component {label}: {size:,} voxels")
-
-        # Determine which to keep
-        if min_size is not None:
-            keep_labels = [label for label, size in sorted_components if size >= min_size]
-        else:
-            keep_labels = [label for label, size in sorted_components[:keep_n]]
-
-        if verbose:
-            print(f"  Keeping {len(keep_labels)} components")
-
-        # Create output - preserve original label values
-        output_mask = np.zeros_like(mask)
-        for comp_label in keep_labels:
-            component_mask = labeled_array == comp_label
-            output_mask[component_mask] = mask[component_mask]
-
-        removed_voxels = np.sum(mask > 0) - np.sum(output_mask > 0)
-        if verbose:
-            print(f"  Removed {removed_voxels:,} voxels")
-
-        return output_mask
+    return output
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Remove small disconnected objects from segmentation masks",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Keep only the largest connected object:
-  python postprocess_mask.py -i mask.nii.gz -o mask_clean.nii.gz
-
-  # Keep the 2 largest objects:
-  python postprocess_mask.py -i mask.nii.gz -o mask_clean.nii.gz --keep 2
-
-  # Keep objects with at least 5000 voxels:
-  python postprocess_mask.py -i mask.nii.gz -o mask_clean.nii.gz --min-size 5000
-
-  # Process each label value separately:
-  python postprocess_mask.py -i mask.nii.gz -o mask_clean.nii.gz --per-label
-
-  # Combine: keep largest per label, minimum 1000 voxels:
-  python postprocess_mask.py -i mask.nii.gz -o mask_clean.nii.gz --per-label --min-size 1000
-        """
+        description="Remove small disconnected objects from segmentation mask"
     )
-
-    parser.add_argument(
-        "--input", "-i", type=Path, required=True,
-        help="Input mask file (NIfTI)"
-    )
-    parser.add_argument(
-        "--output", "-o", type=Path, required=True,
-        help="Output mask file (NIfTI)"
-    )
-    parser.add_argument(
-        "--keep", "-k", type=int, default=1,
-        help="Number of largest components to keep (default: 1)"
-    )
-    parser.add_argument(
-        "--min-size", "-m", type=int, default=None,
-        help="Minimum component size in voxels (overrides --keep)"
-    )
-    parser.add_argument(
-        "--per-label", "-p", action="store_true",
-        help="Process each label value separately"
-    )
-    parser.add_argument(
-        "--quiet", "-q", action="store_true",
-        help="Suppress output"
-    )
+    parser.add_argument("--input", "-i", type=Path, required=True, help="Input mask")
+    parser.add_argument("--output", "-o", type=Path, required=True, help="Output mask")
+    parser.add_argument("--keep", "-k", type=int, default=1, help="Keep N largest (default: 1)")
 
     args = parser.parse_args()
 
-    # Load mask
-    if not args.quiet:
-        print(f"Loading: {args.input}")
+    print(f"Loading: {args.input}")
 
+    # Load NIfTI
     img = nib.load(args.input)
-    mask = img.get_fdata().astype(np.uint8)
 
-    if not args.quiet:
-        print(f"Shape: {mask.shape}")
-        print(f"Total non-zero voxels: {np.sum(mask > 0):,}")
+    # Get data as same dtype
+    original_dtype = img.get_data_dtype()
+    mask_data = np.asarray(img.dataobj)  # Preserves original dtype
 
-    # Process
-    cleaned_mask = postprocess_multilabel_mask(
-        mask,
-        keep_n=args.keep,
-        min_size=args.min_size,
-        per_label=args.per_label,
-        verbose=not args.quiet
-    )
+    print(f"  Shape: {mask_data.shape}")
+    print(f"  Dtype: {mask_data.dtype}")
+    print(f"  Non-zero voxels: {np.sum(mask_data > 0):,}")
+    print(f"  Unique values: {np.unique(mask_data).tolist()}")
 
-    # Save
+    # Remove small objects
+    print(f"\nRemoving small objects (keeping {args.keep} largest)...")
+    cleaned = remove_small_objects(mask_data, keep_n=args.keep)
+
+    # Save with EXACT same affine and header
+    print(f"\nSaving: {args.output}")
+
+    # Create new image with same spatial info
     output_img = nib.Nifti1Image(
-        cleaned_mask.astype(np.uint8),
-        affine=img.affine,
-        header=img.header
+        cleaned.astype(original_dtype),
+        affine=img.affine.copy(),  # Copy to be safe
+        header=img.header.copy()   # Copy to be safe
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     nib.save(output_img, args.output)
 
-    if not args.quiet:
-        print(f"\nSaved: {args.output}")
-        print(f"Final non-zero voxels: {np.sum(cleaned_mask > 0):,}")
+    print(f"  Final non-zero voxels: {np.sum(cleaned > 0):,}")
+    print("Done!")
 
 
 if __name__ == "__main__":
