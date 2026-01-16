@@ -1,0 +1,45 @@
+# Thorax Segmentation Example Config
+#
+# Demonstrates grouping multiple structures into single classes
+
+Target: Thorax_Segmentation
+Task: ['thorax']
+Phase: CT
+
+FlipXYZ: [False, False, False]
+
+# Group 1: Skeleton - merge multiple bones into "skeleton" class
+SkeletonName: 'skeleton'
+SkeletonList: [
+  'sternum', 'scapula_left', 'scapula_right',
+  'rib_left_1', 'rib_left_2', 'rib_left_3', 'rib_left_4', 'rib_left_5', 'rib_left_6',
+  'rib_left_7', 'rib_left_8', 'rib_left_9', 'rib_left_10', 'rib_left_11', 'rib_left_12',
+  'rib_right_1', 'rib_right_2', 'rib_right_3', 'rib_right_4', 'rib_right_5', 'rib_right_6',
+  'rib_right_7', 'rib_right_8', 'rib_right_9', 'rib_right_10', 'rib_right_11', 'rib_right_12',
+  'clavicula_left', 'clavicula_right', 'vertebrae_T1', 'vertebrae_T2', 'vertebrae_T3',
+  'vertebrae_T4', 'vertebrae_T5', 'vertebrae_T6', 'vertebrae_T7', 'vertebrae_T8',
+  'vertebrae_T9', 'vertebrae_T10', 'vertebrae_T11', 'vertebrae_T12'
+]
+
+# Group 2: Heart - merge all heart structures into "heart" class
+HeartName: 'heart'
+HeartList: ['heart_myocardium', 'heart_atrium_left', 'heart_ventricle_left', 'heart_atrium_right', 'heart_ventricle_right']
+
+# Group 3: Lungs - merge all lung lobes into "lungs" class
+LungsName: 'lungs'
+LungsList: ['lung_upper_lobe_left', 'lung_lower_lobe_left', 'lung_upper_lobe_right', 'lung_middle_lobe_right', 'lung_lower_lobe_right']
+
+# Output classes - can mix group names and individual organs
+# Class value will be assigned in order: skeleton=1, heart=2, lungs=3, aorta=4
+TargetClass: [
+  'skeleton',           # Group (uses SkeletonList)
+  'heart',              # Group (uses HeartList)
+  'lungs',              # Group (uses LungsList)
+  'aorta_thoracica_pass_mediastinum'  # Individual organ
+]
+
+MatchCoordinate: True
+
+PostProcess:
+  RemoveSmallObjects: True
+  KeepLargestN: 2
