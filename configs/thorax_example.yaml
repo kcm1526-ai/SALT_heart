@@ -3,7 +3,7 @@
 
 Target: Thorax_Segmentation
 Task: ['thorax']
-Phase: CT
+Phase: AP
 
 FlipXYZ: [False, False, False]
 

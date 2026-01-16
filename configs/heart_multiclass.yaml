@@ -4,7 +4,7 @@
 
 Target: Heart_Multiclass
 Task: ['heart']
-Phase: CT
+Phase: AP
 
 FlipXYZ: [False, False, False]
 
