@@ -3,7 +3,7 @@
 
 Target: Heart_Binary
 Task: ['heart']
-Phase: CT
+Phase: AP
 
 FlipXYZ: [False, False, False]
 
