@@ -1,0 +1,29 @@
+# Heart Segmentation Config
+#
+# Format:
+#   {GroupName}Name: 'output_class_name'
+#   {GroupName}List: ['organ1', 'organ2', ...]  # These will be merged into output_class_name
+#   TargetClass: ['class1', 'class2', ...]  # Final classes to output
+#   MatchCoordinate: True/False  # Preserve original coordinates
+
+Target: Heart_Segmentation
+Task: ['heart']
+Phase: CT
+
+# Flip axes if needed
+FlipXYZ: [False, False, False]
+
+# Group all heart structures into single "heart" class
+HeartName: 'heart'
+HeartList: ['heart_myocardium', 'heart_atrium_left', 'heart_ventricle_left', 'heart_atrium_right', 'heart_ventricle_right']
+
+# Output classes - use group name "heart" (will merge all structures in HeartList)
+TargetClass: ['heart']
+
+# Preserve original coordinate system
+MatchCoordinate: True
+
+# Post-processing options
+PostProcess:
+  RemoveSmallObjects: True
+  KeepLargestN: 1  # Keep only largest connected component

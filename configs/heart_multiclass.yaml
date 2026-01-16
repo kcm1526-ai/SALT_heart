@@ -1,0 +1,24 @@
+# Heart Multi-class Segmentation Config
+#
+# Outputs each heart structure as separate class (1-5)
+
+Target: Heart_Multiclass
+Task: ['heart']
+Phase: CT
+
+FlipXYZ: [False, False, False]
+
+# No grouping - output each structure separately
+TargetClass: [
+  'heart_myocardium',      # -> output value 1
+  'heart_atrium_left',     # -> output value 2
+  'heart_ventricle_left',  # -> output value 3
+  'heart_atrium_right',    # -> output value 4
+  'heart_ventricle_right'  # -> output value 5
+]
+
+MatchCoordinate: True
+
+PostProcess:
+  RemoveSmallObjects: True
+  KeepLargestN: 1
