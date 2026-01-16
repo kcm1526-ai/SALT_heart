@@ -153,12 +153,12 @@ poetry run python -m salt.classic_evaluate \
 
 ## Config-based Inference
 
-For extracting specific structures with custom grouping, use `infer_config.py` with a YAML config file.
+For extracting specific structures with custom grouping, use `predict_config.py` with a YAML config file.
 
 ### Usage
 
 ```bash
-python infer_config.py \
+python predict_config.py \
     --config configs/heart_binary.yaml \
     --input /path/to/image.nii.gz \
     --output /path/to/output_dir
@@ -166,7 +166,7 @@ python infer_config.py \
 
 For DICOM input (folder):
 ```bash
-python infer_config.py \
+python predict_config.py \
     --config configs/heart_binary.yaml \
     --input /path/to/dicom_folder \
     --output /path/to/output_dir
