@@ -150,3 +150,59 @@ poetry run python -m salt.classic_evaluate \
        --predictions-dir /path/to/the/predictions \
        --output-dir /path/for/results
 ```
+
+## Config-based Inference
+
+For extracting specific structures with custom grouping, use `infer_config.py` with a YAML config file.
+
+### Usage
+
+```bash
+python infer_config.py \
+    --config configs/heart_binary.yaml \
+    --input /path/to/image.nii.gz \
+    --output /path/to/output_dir
+```
+
+For DICOM input (folder):
+```bash
+python infer_config.py \
+    --config configs/heart_binary.yaml \
+    --input /path/to/dicom_folder \
+    --output /path/to/output_dir
+```
+
+### Config File Format
+
+```yaml
+Target: Heart_Binary          # Name for output files
+Task: ['heart']               # Task description
+Phase: AP                     # Phase name
+
+FlipXYZ: [False, False, False]
+
+# Group definition: merge multiple structures into one class
+HeartName: 'heart'
+HeartList: [
+  'heart_myocardium',
+  'heart_atrium_left',
+  'heart_ventricle_left',
+  'heart_atrium_right',
+  'heart_ventricle_right'
+]
+
+# Output classes (use group names or individual organ names)
+TargetClass: ['heart']
+
+MatchCoordinate: True
+
+PostProcess:
+  RemoveSmallObjects: True
+  KeepLargestN: 1
+```
+
+### Example Configs
+
+- `configs/heart_binary.yaml` - All heart structures merged into single class (heart=1)
+- `configs/heart_multiclass.yaml` - Each heart structure as separate class (1-5)
+- `configs/thorax_example.yaml` - Multiple organ groups (ribs, spine, heart, lungs, aorta, etc.)
